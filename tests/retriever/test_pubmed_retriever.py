@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever, _parse_affiliation
 from tests.canned_responses import (
     SAMPLE_PUBMED_ESEARCH_RESPONSE,
@@ -107,6 +109,42 @@ def test_pubmed_fallback_escalates_when_strict_query_too_narrow(config, monkeypa
     result = retriever._retrieve_raw_papers()
 
     assert result == [{"pmids": [str(i) for i in range(20)]}]
+
+
+def test_pubmed_no_query_mode5_uses_date_only_query(config, monkeypatch):
+    """Zotero-only ranking still needs a recent PubMed candidate pool."""
+    captured_queries = []
+
+    monkeypatch.setattr(
+        PubMedRetriever,
+        "_fetch_pmids",
+        lambda self, query: captured_queries.append(query) or ["1", "2"],
+    )
+    monkeypatch.setattr(
+        PubMedRetriever,
+        "_fetch_details",
+        lambda self, pmids: [{"pmids": pmids}],
+    )
+
+    retriever = PubMedRetriever(config)
+    expected_query = retriever._date_filter()
+    result = retriever._retrieve_raw_papers()
+
+    assert captured_queries == [expected_query]
+    assert result == [{"pmids": ["1", "2"]}]
+
+
+def test_pubmed_no_query_keyword_mode_raises(config):
+    """Keyword modes must not fall back to an unfiltered PubMed search."""
+    from omegaconf import open_dict
+
+    with open_dict(config):
+        config.search.mode = 3
+
+    retriever = PubMedRetriever(config)
+
+    with pytest.raises(ValueError, match="PubMed query is required"):
+        retriever._retrieve_raw_papers()
 
 
 def test_pubmed_max_results_override(config):
