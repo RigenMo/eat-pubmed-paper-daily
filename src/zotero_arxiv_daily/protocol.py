@@ -65,10 +65,12 @@ class Paper:
             logger.warning(f"Neither full text nor abstract is provided for {self.url}")
             return "Failed to generate TLDR. Neither full text nor abstract is provided"
         
-        # use gpt-4o tokenizer for estimation
+        # Use the GPT-4o tokenizer as an approximate budget for the configured
+        # provider; tokenization can differ for non-GPT models.
         enc = tiktoken.encoding_for_model("gpt-4o")
         prompt_tokens = enc.encode(prompt)
-        prompt_tokens = prompt_tokens[:4000]  # truncate to 4000 tokens
+        max_input_tokens = int(llm_params.get('max_input_tokens', 4000))
+        prompt_tokens = prompt_tokens[:max_input_tokens]
         prompt = enc.decode(prompt_tokens)
         
         response = openai_client.chat.completions.create(

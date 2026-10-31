@@ -13,9 +13,12 @@ email:
 llm:
   api:
     key: ${oc.env:OPENAI_API_KEY}
-    base_url: ${oc.env:OPENAI_API_BASE}
+    base_url: https://llm.goaichat.top/v1
+    timeout: 9000
   generation_kwargs:
-    model: gpt-4o-mini
+    model: kimi-k3
+    max_tokens: 65536
+  max_input_tokens: 1000000
 
 source:
   arxiv:

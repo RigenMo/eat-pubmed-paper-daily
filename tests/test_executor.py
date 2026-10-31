@@ -99,6 +99,25 @@ def test_filter_corpus_no_filters_returns_all():
     assert filtered == corpus
 
 
+def test_executor_passes_configured_llm_timeout_to_openai(config, monkeypatch):
+    """The OpenAI-compatible client receives the timeout in seconds."""
+    from omegaconf import open_dict
+
+    captured = {}
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with open_dict(config):
+        config.llm.api.timeout = 1234
+    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", fake_openai)
+
+    Executor(config)
+
+    assert captured["timeout"] == 1234.0
+
+
 # ---------------------------------------------------------------------------
 # fetch_zotero_corpus
 # ---------------------------------------------------------------------------

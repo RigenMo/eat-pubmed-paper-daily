@@ -55,6 +55,36 @@ def test_tldr_truncates_long_prompt(llm_params):
     assert result is not None
 
 
+def test_tldr_uses_configured_input_token_budget():
+    from types import SimpleNamespace
+
+    import tiktoken
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
+        )
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    paper = make_sample_paper(full_text="word " * 10000)
+    params = {
+        "language": "English",
+        "max_input_tokens": 32,
+        "generation_kwargs": {"model": "kimi-k3", "max_tokens": 128},
+    }
+
+    paper.generate_tldr(client, params)
+
+    enc = tiktoken.encoding_for_model("gpt-4o")
+    prompt = captured["messages"][1]["content"]
+    assert len(enc.encode(prompt)) <= 32
+
+
 # ---------------------------------------------------------------------------
 # generate_affiliations
 # ---------------------------------------------------------------------------

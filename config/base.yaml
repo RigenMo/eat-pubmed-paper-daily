@@ -31,10 +31,12 @@ llm:
   api:
     key: ??? # API Key of your LLM API. Example: sk-xxx
     base_url: ??? # API URL of your LLM API. Example: https://api.openai.com/v1
+    timeout: 600 # OpenAI-compatible API request timeout in seconds. Example: 9000
   generation_kwargs:
   # Arguments for the LLM API. See [here](https://platform.openai.com/docs/api-reference/chat/create) for more details.
     max_tokens: 16384
     model: ???
+  max_input_tokens: 4000 # Prompt token budget; tiktoken's GPT-4 approximation may differ by provider.
   language: Chinese # Preferred language for the TL;DR. Example: English
 
 reranker:
