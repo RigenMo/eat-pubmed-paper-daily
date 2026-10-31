@@ -181,6 +181,25 @@ class PubMedRetriever(BaseRetriever):
 
         pmids: list[str] = []
 
+        # Mode 5 deliberately has no keyword query: retrieve the recent PubMed
+        # window first, then let the Zotero-based reranker select relevant papers.
+        # Keyword modes must not silently broaden to an unfiltered date-only
+        # search when keyword extraction failed to provide either query.
+        if not self._pubmed_query and not self._pubmed_broad_query:
+            if int(self.config.search.mode) < 5:
+                raise ValueError(
+                    "PubMed query is required when search.mode < 5; "
+                    "provide keywords or fix keyword extraction."
+                )
+
+            logger.info(f"PubMed [date-only]: {date_filter}")
+            pmids = self._fetch_pmids(date_filter)
+            logger.info(f"PubMed [date-only] → {len(pmids)} result(s)")
+            if not pmids:
+                logger.warning("PubMed: no results found for the date-only query")
+                return []
+            return self._finalise(pmids)
+
         # ── Level 1: strict query (1-2 AND concept groups, [tiab]) ──────────
         if self._pubmed_query:
             pmids = _try("strict", self._pubmed_query)
