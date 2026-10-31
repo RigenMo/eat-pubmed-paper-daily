@@ -48,7 +48,12 @@ class Executor:
         self.include_path_patterns = normalize_path_patterns(config.zotero.include_path, "include_path")
         self.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, "ignore_path")
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
+        llm_timeout = float(config.llm.api.get("timeout", 600))
+        self.openai_client = OpenAI(
+            api_key=config.llm.api.key,
+            base_url=config.llm.api.base_url,
+            timeout=llm_timeout,
+        )
 
         # Validate search mode vs keywords
         search_mode = int(config.search.mode)
