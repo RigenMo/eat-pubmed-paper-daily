@@ -1,0 +1,37 @@
+name: Send today's email once
+on:
+  push:
+    branches:
+      - codex/send-today-20261101-104007
+permissions:
+  contents: read
+
+jobs:
+  calculate-and-send:
+    if: github.event.head_commit.message == 'Send one authorized daily email for 2026-11-01 at 10-40-07 UTC' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          repository: RigenMo/eat-pubmed-paper-daily
+          ref: a2584ddabf1b6bbb34e156f170db5c1a7ef62b15
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run script
+        env:
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          OPENAI_API_BASE: https://llm.goaichat.top/v1
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
+          uv run src/zotero_arxiv_daily/main.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=9000 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
