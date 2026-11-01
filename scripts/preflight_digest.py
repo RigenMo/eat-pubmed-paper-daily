@@ -20,6 +20,7 @@ def main(config: DictConfig):
     mode = os.environ.get("PREFLIGHT_MODE", "automatic")
     output = Path("outputs/preflight") / mode
     output.mkdir(parents=True, exist_ok=True)
+    failure = None
 
     if mode == "reader":
         # Two public papers from the user's failed mail: one invalid locator,
@@ -42,9 +43,12 @@ def main(config: DictConfig):
         )
     else:
         executor = Executor(config)
-        executor.run(send_mail=False)
+        try:
+            executor.run(send_mail=False)
+        except Exception as error:
+            failure = error
         papers = getattr(executor, "last_papers", [])
-        html = getattr(executor, "last_email_content", render_email([]))
+        html = getattr(executor, "last_email_content", render_email(papers))
 
     # Only generated reports are exported. Full Zotero records, source abstracts,
     # request prompts and API credentials are never written to an artifact/log.
@@ -69,12 +73,14 @@ def main(config: DictConfig):
         "complete_cards": sum(paper.reading_card is not None for paper in papers),
         "journals": dict(Counter(paper.journal for paper in papers)),
         "mail_sent": False,
+        "failure_type": type(failure).__name__ if failure else None,
     }
     print("PREFLIGHT_RESULT " + json.dumps(summary, ensure_ascii=False))
+    if failure is not None:
+        raise failure
     if mode == "reader" and summary["complete_cards"] != 2:
         raise RuntimeError("The real reader regression did not produce both complete cards")
 
 
 if __name__ == "__main__":
     main()
-

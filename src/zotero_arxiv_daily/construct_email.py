@@ -747,4 +747,3 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
 
     content = '<div style="height:16px; line-height:16px;">&nbsp;</div>'.join(parts)
     return framework.replace("__CONTENT__", content)
-

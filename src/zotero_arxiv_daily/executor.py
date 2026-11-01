@@ -430,6 +430,7 @@ class Executor:
 
             # Step 5: generate translated abstracts, reading cards and title translations
             logger.info("Generating Chinese abstracts, reading cards and title translations...")
+            self.last_papers = reranked_papers
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
                 if p.reading_card is not None or not recommendation_config.get("require_cards", False):

@@ -18,6 +18,7 @@ _CARD_LENGTH_GUIDANCE = """
 长度预算按字符计算（汉字、英文字母、数字、标点和格式标签均计入）：
 essence每句不超过30字符；design每项不超过45字符；innovation每句不超过35字符；
 criticism每句不超过40字符；self_test不超过35字符。通常只保留一条最强证据；
+self_test只写一句，恰含一个问号并以问号结束，问号后不附标签、括注、答案或第二问。
 evidence每项的claim/ comparison/ result/ locator分别不超过20/25/40/12字符。
 全文摘要已经保留细节，精读卡不重复罗列。优先保留影响核心判断的数字和限定语。
 """
@@ -638,4 +639,3 @@ class CorpusPaper:
     paths: list[str]
     key: Optional[str] = None
     url: Optional[str] = None
-
