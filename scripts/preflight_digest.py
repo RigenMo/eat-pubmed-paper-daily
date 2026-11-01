@@ -5,7 +5,7 @@ import json
 import os
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
 
 from zotero_arxiv_daily.construct_email import render_email
@@ -62,6 +62,7 @@ def main(config: DictConfig):
             "recommendation_matches": paper.recommendation_matches,
         })
     (output / "index.html").write_text(html, encoding="utf-8")
+    reports = OmegaConf.to_container(OmegaConf.create(reports), resolve=True)
     (output / "reports.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {
         "mode": mode, "papers": len(papers),
@@ -76,3 +77,4 @@ def main(config: DictConfig):
 
 if __name__ == "__main__":
     main()
+
