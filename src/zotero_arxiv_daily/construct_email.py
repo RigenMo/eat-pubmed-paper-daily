@@ -492,10 +492,9 @@ def _build_publication_html(
             if not date_text or not label:
                 continue
             source_url = _safe_url(item.get("source"))
-            # The dedicated first-publication row already carries this date.
+            # Keep the publication date in the chronological history too.
             if label == "发表" and publication_text and date_text == publication_text:
                 publication_source_url = publication_source_url or source_url
-                continue
             date_html = escape(date_text, quote=False)
             if source_url:
                 date_html += (
@@ -521,7 +520,7 @@ def _build_publication_html(
         rows.append(
             '<div style="margin:2px 0; color:#555555;">'
             "<strong>出版历程：</strong>"
-            + "".join(history_items)
+            + ' <span aria-hidden="true">→</span> '.join(history_items)
             + "</div>"
         )
     if not rows and show_missing:
@@ -748,3 +747,4 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
 
     content = '<div style="height:16px; line-height:16px;">&nbsp;</div>'.join(parts)
     return framework.replace("__CONTENT__", content)
+
