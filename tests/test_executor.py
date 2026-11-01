@@ -140,6 +140,8 @@ def test_executor_applies_debug_limit_after_reranking(config, monkeypatch):
 
     executor = Executor.__new__(Executor)
     executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda corpus: corpus
     executor._search_mode = 5
     executor._keywords_raw = None
     executor._structured_keywords = None
@@ -185,6 +187,8 @@ def test_executor_strict_journal_gate_does_not_allow_arxiv_bypass(config, monkey
 
     executor = Executor.__new__(Executor)
     executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda corpus: corpus
     executor._search_mode = 5
     executor._keywords_raw = None
     executor._structured_keywords = None

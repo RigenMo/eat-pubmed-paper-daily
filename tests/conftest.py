@@ -40,6 +40,7 @@ def _base_config():
                 "reranker.api.base_url=http://localhost:30000/v1",
                 "reranker.api.model=text-embedding-3-large",
                 "source.arxiv.category=[cs.AI,cs.CV]",
+                "source.mix_mode=5",
                 "executor.source=[arxiv]",
                 "executor.reranker=api",
                 "executor.debug=false",
