@@ -1,4 +1,4 @@
-"""Tests for zotero_arxiv_daily.protocol: Paper.generate_tldr, Paper.generate_affiliations."""
+"""Tests for structured reader output and the remaining Paper helpers."""
 
 import pytest
 
@@ -22,7 +22,11 @@ def test_tldr_returns_response(llm_params):
     client = make_stub_openai_client()
     paper = make_sample_paper()
     result = paper.generate_tldr(client, llm_params)
-    assert result == "Hello! How can I assist you today?"
+    assert "一、原文摘要中文版" in result
+    assert "二、精读卡" in result
+    assert paper.abstract_zh == "本文探索一种新的组件工程方法。"
+    assert paper.reading_card["essence"]
+    assert len(paper.reading_card["innovation"]) == 2
     assert paper.tldr == result
 
 
@@ -30,7 +34,8 @@ def test_tldr_without_abstract_or_fulltext(llm_params):
     client = make_stub_openai_client()
     paper = make_sample_paper(abstract="", full_text=None)
     result = paper.generate_tldr(client, llm_params)
-    assert "Failed to generate TLDR" in result
+    assert result == "生成失败：摘要与正文材料均未提供。"
+    assert paper.reading_card is None
 
 
 def test_tldr_falls_back_to_abstract_on_error(llm_params):
@@ -45,7 +50,10 @@ def test_tldr_falls_back_to_abstract_on_error(llm_params):
         )
     )
     result = paper.generate_tldr(broken_client, llm_params)
-    assert result == paper.abstract
+    assert result.startswith("生成失败：保留原始摘要")
+    assert paper.abstract in result
+    assert paper.abstract_zh is None
+    assert paper.reading_card is None
 
 
 def test_tldr_truncates_long_prompt(llm_params):
@@ -55,34 +63,134 @@ def test_tldr_truncates_long_prompt(llm_params):
     assert result is not None
 
 
-def test_tldr_uses_configured_input_token_budget():
+def test_reader_keeps_full_abstract_and_bounds_full_text_excerpt():
     from types import SimpleNamespace
-
-    import tiktoken
 
     captured = {}
 
     def create(**kwargs):
         captured.update(kwargs)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"abstract_zh":"摘要翻译",'
+                            '"reading_card":{"material_scope":"摘要与正文节选",'
+                            '"essence":["核心一。","核心二。"],'
+                            '"design":{"objects_data":"对象数据。","task_definitions":"任务定义。",'
+                            '"implementation":"实施分析。","comparison_validation_scope":"比较验证范围。"},'
+                            '"evidence":[],"innovation":["【作者主张】删除检验未报告。","【作者主张】创新主张。"],'
+                            '"criticism":["替代解释。","作者回应。","校准结论。"],'
+                            '"self_test":"哪个结果最需要复核？"}}'
+                        )
+                    )
+                )
+            ]
         )
 
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
-    paper = make_sample_paper(full_text="word " * 10000)
+    long_abstract = "完整摘要材料 " * 100
+    paper = make_sample_paper(abstract=long_abstract, full_text="正文材料 " * 10000)
     params = {
-        "language": "English",
-        "max_input_tokens": 32,
+        "language": "Chinese",
+        "max_input_tokens": 3000,
         "generation_kwargs": {"model": "kimi-k3", "max_tokens": 128},
     }
 
     paper.generate_tldr(client, params)
 
-    enc = tiktoken.encoding_for_model("gpt-4o")
     prompt = captured["messages"][1]["content"]
-    assert len(enc.encode(prompt)) <= 32
+    assert long_abstract.strip() in prompt
+    assert "正文节选：按输入预算截取" in prompt
+    assert "未提供全文其余部分" in prompt
+    from zotero_arxiv_daily.protocol import Paper
+    encoder = Paper._reader_encoder()
+    assert sum(len(encoder.encode(message["content"])) for message in captured["messages"]) <= 3000
+
+
+def test_reader_rejects_non_json_response_with_chinese_fallback(llm_params):
+    from types import SimpleNamespace
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                create=lambda **kwargs: SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))]
+                )
+            )
+        )
+    )
+    paper = make_sample_paper()
+
+    result = paper.generate_tldr(client, llm_params)
+
+    assert result.startswith("生成失败：保留原始摘要")
+    assert "Failed to generate" not in result
+    assert paper.abstract_zh is None
+
+
+def test_reader_rejects_budget_too_small_for_the_complete_abstract():
+    from types import SimpleNamespace
+
+    def unexpected_request(**kwargs):
+        pytest.fail("incomplete abstract must not be sent to the model")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=unexpected_request)))
+    paper = make_sample_paper(abstract="Long abstract. " * 500)
+    paper.generate_tldr(client, {"max_input_tokens": 32})
+
+    assert paper.abstract_zh is None
+    assert paper.reading_card is None
+    assert paper.abstract in paper.tldr
+
+
+def test_reader_uses_program_scope_and_valid_paragraph_locations(llm_params):
+    paper = make_sample_paper(full_text=None)
+    paper.generate_tldr(make_stub_openai_client(), llm_params)
+
+    assert paper.material_scope == "仅据摘要（正文与补充材料未提供）"
+    assert paper.reading_card["material_scope"] == paper.material_scope
+    assert paper.reading_card["evidence"][0]["locator"] == "摘要段落1"
+
+
+def test_body_only_failure_preserves_the_fact_that_body_material_exists(llm_params):
+    from types import SimpleNamespace
+    from zotero_arxiv_daily.construct_email import render_email
+
+    def failed_request(**kwargs):
+        raise RuntimeError("test API failure")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=failed_request)))
+    paper = make_sample_paper(abstract="", full_text="Visible body text.")
+    paper.generate_tldr(client, llm_params)
+    html = render_email([paper])
+
+    assert "正文已提供" in paper.material_scope
+    assert "已有正文材料" in html
+    assert "摘要与正文材料均未提供" not in html
+    assert "原文摘要中文版" not in html
+
+
+@pytest.mark.parametrize("invalid_field", ["locator", "length", "self_test"])
+def test_reader_rejects_invalid_locations_overlength_or_answered_selftest(invalid_field):
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+    from zotero_arxiv_daily.protocol import Paper
+
+    payload = json.loads(_READER_RESPONSE)
+    if invalid_field == "locator":
+        payload["reading_card"]["evidence"][0]["locator"] = "正文段落999"
+    elif invalid_field == "length":
+        # Evidence counts toward the card budget, not just the other fields.
+        payload["reading_card"]["evidence"][0]["result"] = "结果" * 500
+    else:
+        payload["reading_card"]["self_test"] = "什么条件成立？答案：所有条件。"
+
+    with pytest.raises(ValueError):
+        Paper._validate_reader_payload(payload, "仅据摘要", {"摘要段落1"})
 
 
 # ---------------------------------------------------------------------------

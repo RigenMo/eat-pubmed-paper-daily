@@ -88,6 +88,22 @@ def test_pubmed_convert_to_paper_no_affiliation(config):
     assert paper.authors == ["Lee K"]
 
 
+def test_pubmed_preserves_abstract_structure_and_attaches_audited_metrics(config):
+    retriever = PubMedRetriever(config)
+    raw = {
+        "PMID": "3", "TI": "Structured abstract", "JT": "Nature Aging",
+        "AB": ["BACKGROUND: Original background.", "RESULTS: 12 participants; 3.0 years."],
+    }
+
+    paper = retriever.convert_to_paper(raw)
+
+    assert paper.abstract == "BACKGROUND: Original background.\n\nRESULTS: 12 participants; 3.0 years."
+    assert paper.journal_metrics["jif"] == 25.0
+    assert paper.journal_metrics["year"] == 2025
+    assert paper.journal_metrics.get("jcr_quartile") is None
+    assert paper.journal_metrics.get("cas_quartile") is None
+
+
 def test_parse_affiliation_strips_postal_code_and_electronic_address():
     ad = "Department of Chemistry, MIT, Cambridge, MA 02139, USA. Electronic address: x@x.edu."
     assert _parse_affiliation(ad) == "Department of Chemistry, MIT"

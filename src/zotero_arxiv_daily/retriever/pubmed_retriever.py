@@ -342,7 +342,7 @@ class PubMedRetriever(BaseRetriever):
         # Abstract: AB field, may be a list for structured abstracts
         ab = raw_paper.get("AB", "")
         if isinstance(ab, list):
-            ab = " ".join(ab)
+            ab = "\n\n".join(ab)
         if not ab:
             return None  # skip papers with no abstract
 
@@ -384,6 +384,17 @@ class PubMedRetriever(BaseRetriever):
         else:
             affiliations = None
 
+        journal_metrics = None
+        for entry in self.config.get("journals", {}).get("whitelist", []) or []:
+            aliases = entry.get("aliases", []) or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            names = [entry.get("name", ""), *aliases]
+            normalized_names = {_normalize_journal_name(name) for name in names if name}
+            if journal and _normalize_journal_name(journal) in normalized_names:
+                journal_metrics = dict(entry)
+                break
+
         return Paper(
             source=self.name,
             title=title,
@@ -393,5 +404,6 @@ class PubMedRetriever(BaseRetriever):
             pdf_url=pdf_url,
             full_text=None,
             journal=journal,
+            journal_metrics=journal_metrics,
             affiliations=affiliations,
         )

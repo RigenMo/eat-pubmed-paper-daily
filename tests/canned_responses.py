@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from types import SimpleNamespace
+import json
 
 from zotero_arxiv_daily.protocol import CorpusPaper, Paper
 
@@ -15,6 +16,41 @@ _AFFILIATION_RESPONSE = '["TsingHua University","Peking University"]'
 _TITLE_TRANSLATION_MARKER = "professional academic translator"
 _TITLE_TRANSLATION_RESPONSE = "示例论文标题"
 _TLDR_RESPONSE = "Hello! How can I assist you today?"
+_READER_MARKER = "结构化中文文献阅读卡"
+_READER_RESPONSE = json.dumps(
+    {
+        "abstract_zh": "本文探索一种新的组件工程方法。",
+        "reading_card": {
+            "material_scope": "摘要与正文",
+            "essence": ["研究提出一个新的组件工程方法。", "结果显示该方法在给定材料中具有可观察的改进。"],
+            "design": {
+                "objects_data": "对象与数据：示例组件工程数据。",
+                "task_definitions": "研究任务与关键定义：比较新方法和基线方法。",
+                "implementation": "实施/分析：按论文所述流程完成分析。",
+                "comparison_validation_scope": "比较、验证与适用范围：结果仅适用于所报告的研究场景。",
+            },
+            "evidence": [
+                {
+                    "claim": "新方法表现更好",
+                    "comparison": "相对于基线方法",
+                    "result": "报告了改进结果",
+                    "locator": "摘要段落1",
+                }
+            ],
+            "innovation": [
+                "【推断】去掉该方法新增的组件，材料中的核心比较便无法回答。",
+                "【作者主张】该方法为组件工程提供了新的实现路径。",
+            ],
+            "criticism": [
+                "替代解释：差异也可能来自样本或实施条件。",
+                "作者回应：材料中仅报告了既定比较，未充分排除该解释。",
+                "校准结论：结果支持相关改进，但不能单独证明普遍因果效果。",
+            ],
+            "self_test": "如果去掉关键组件，结果是否仍然成立？",
+        },
+    },
+    ensure_ascii=False,
+)
 
 
 def _make_chat_response(content: str) -> SimpleNamespace:
@@ -40,6 +76,8 @@ def _stub_chat_create(**kwargs):
         return _make_chat_response(_AFFILIATION_RESPONSE)
     if _TITLE_TRANSLATION_MARKER in request_str:
         return _make_chat_response(_TITLE_TRANSLATION_RESPONSE)
+    if _READER_MARKER in request_str:
+        return _make_chat_response(_READER_RESPONSE)
     return _make_chat_response(_TLDR_RESPONSE)
 
 
