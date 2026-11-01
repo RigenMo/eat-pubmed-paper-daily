@@ -201,8 +201,12 @@ def test_verify_recommendations_keeps_only_verified_anchor_and_safe_quotes():
             ]
         }
 
-    result = verify_recommendations([paper], _DeterministicClient(related), {})
+    audit = []
+    result = verify_recommendations([paper], _DeterministicClient(related), {}, audit=audit)
     assert result == [paper]
+    assert audit[0]["related"] is True
+    assert audit[0]["reason"] == "Both materials directly address dietary timing."
+    assert "anchor_abstract" not in audit[0]
     assert paper.recommendation_matches == [
         {
             "anchor_title": "Meal timing and metabolic health",
@@ -335,3 +339,4 @@ def test_build_zotero_queries_discards_ungrounded_extra_term_but_keeps_each_sour
     assert any("heart failure" in query for query in queries)
     assert any("meal timing" in query for query in queries)
     assert not any("invented" in query or "cohort" in query for query in queries)
+

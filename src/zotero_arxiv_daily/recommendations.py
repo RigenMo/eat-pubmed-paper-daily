@@ -699,6 +699,7 @@ def verify_recommendations(
     openai_client: Any,
     llm_params: Any,
     batch_size: int = 5,
+    audit: list[dict[str, Any]] | None = None,
 ) -> list[Paper]:
     """Filter papers through a conservative, corpus-grounded LLM gate.
 
@@ -747,6 +748,16 @@ def verify_recommendations(
 
     verified_papers = []
     for paper, decision, anchors in decisions:
+        if audit is not None:
+            audit.append({
+                "title": paper.title,
+                "url": paper.url,
+                "journal": paper.journal,
+                "publication_date": paper.publication_date,
+                "jif": (paper.journal_metrics or {}).get("jif"),
+                "related": decision["related"],
+                "reason": decision["reason"],
+            })
         if not decision["related"]:
             continue
         anchor_index = decision["anchor_index"]
@@ -772,3 +783,4 @@ __all__ = [
     "build_zotero_queries",
     "verify_recommendations",
 ]
+

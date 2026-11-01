@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         mode: ${{ fromJSON(contains(github.event.head_commit.message, '[reader-only]') && '["reader"]' || '["reader", "automatic"]') }}
     steps:
@@ -32,7 +33,7 @@ jobs:
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set GOAICHAT_API_KEY first."; exit 1; }
           test -n "$EASYSCHOLAR_API_KEY" || { echo "Set EASYSCHOLAR_API_KEY first."; exit 1; }
-          uv run python scripts/preflight_digest.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=9000 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 search.mode=5 source.mix_mode=1 recommendations.max_papers=2 recommendations.verify_limit=6 recommendations.max_per_journal=1 executor.send_empty=true executor.character_pool=[] email.sender=preflight@example.invalid email.receiver=preflight@example.invalid email.smtp_server=localhost email.smtp_port=1 email.sender_password=unused
+          uv run python scripts/preflight_digest.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=9000 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 search.mode=5 source.mix_mode=1 recommendations.max_papers=2 recommendations.max_per_journal=1 executor.send_empty=true executor.character_pool=[] email.sender=preflight@example.invalid email.receiver=preflight@example.invalid email.smtp_server=localhost email.smtp_port=1 email.sender_password=unused
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -40,3 +41,4 @@ jobs:
           path: outputs/preflight/${{ matrix.mode }}/
           retention-days: 7
           if-no-files-found: ignore
+

@@ -11,7 +11,7 @@ search:
 recommendations:
   enabled: true # Verify each candidate against actual Zotero evidence before recommendation.
   publication_days: 30 # Automatic recommendations use recent first-publication dates, newest first.
-  candidate_limit: 60 # Semantic shortlist for journal-metric queries.
+  candidate_limit: 200 # Check the full default PubMed pool before prioritizing publication date.
   verify_limit: 20 # Relevant, IF-eligible candidates to examine in detail.
   batch_size: 5
   max_papers: 10 # Deliver fewer when fewer papers qualify.
@@ -72,3 +72,4 @@ executor:
   retrieval_days: 1 # Legacy/source retrieval window; automatic Zotero recommendations use publication_days above.
   send_interval_days: 1 # Intended email sending interval in days (for cron reference only). See docs/cron-guide.md. Example: 7
   favorite_journals: null # A list of journal names to boost in ranking. Papers from these journals get 1.5x score. Example: ["Nature Medicine", "The Lancet", "JAMA"]
+

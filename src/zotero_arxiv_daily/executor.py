@@ -396,7 +396,7 @@ class Executor:
                 favorite_journals=fav_journals,
             )
             if verify_related:
-                candidate_limit = int(recommendation_config.get("candidate_limit", 60))
+                candidate_limit = int(recommendation_config.get("candidate_limit", 200))
                 reranked_papers = reranked_papers[:candidate_limit]
 
             # Query metrics only for the semantic shortlist, across all journals.
@@ -406,9 +406,11 @@ class Executor:
                 # candidates, prioritize actual first publication, not indexing.
                 reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
                 verify_limit = int(recommendation_config.get("verify_limit", 20))
+                self.recommendation_audit = []
                 reranked_papers = verify_recommendations(
                     reranked_papers[:verify_limit], self.openai_client, self.config.llm,
                     batch_size=int(recommendation_config.get("batch_size", 5)),
+                    audit=self.recommendation_audit,
                 )
 
             max_paper_num = int(self.config.executor.max_paper_num)
@@ -466,3 +468,4 @@ class Executor:
         send_email(self.config, email_content)
         logger.info(f"Email sent successfully ({len(reranked_papers)} papers)")
         return len(reranked_papers)
+

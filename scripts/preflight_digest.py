@@ -49,6 +49,10 @@ def main(config: DictConfig):
             failure = error
         papers = getattr(executor, "last_papers", [])
         html = getattr(executor, "last_email_content", render_email(papers))
+        audit = getattr(executor, "recommendation_audit", [])
+        (output / "selection-audit.json").write_text(
+            json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     # Only generated reports are exported. Full Zotero records, source abstracts,
     # request prompts and API credentials are never written to an artifact/log.
@@ -78,9 +82,12 @@ def main(config: DictConfig):
     print("PREFLIGHT_RESULT " + json.dumps(summary, ensure_ascii=False))
     if failure is not None:
         raise failure
+    if mode == "automatic" and not summary["complete_cards"]:
+        raise RuntimeError("No complete qualifying recommendation; positive end-to-end validation is incomplete")
     if mode == "reader" and summary["complete_cards"] != 2:
         raise RuntimeError("The real reader regression did not produce both complete cards")
 
 
 if __name__ == "__main__":
     main()
+
