@@ -22,6 +22,14 @@ evidence每项的claim/ comparison/ result/ locator分别不超过20/25/40/12字
 全文摘要已经保留细节，精读卡不重复罗列。优先保留影响核心判断的数字和限定语。
 """
 
+_READER_GROUNDING_RULES = """
+比较对象、验证方法和研究设计只有材料明确陈述时才可写成事实。
+多数据集整合、跨物种映射、相关分析和不同检测手段不能自动称为交叉验证、独立验证或因果验证。
+材料未说明的比较基准、健康对照、横断或纵向设计，写【未报告/材料未提供】，不得推定。
+不把“材料未报告”写成“作者没有做”：例如摘要未写外部验证或扰动实验，不能断言“无外部验证”或“无扰动实验”。
+未提供的研究设计不作为已证实缺陷；替代解释与失败风险须标【推断】。
+"""
+
 _READER_INSTRUCTIONS = """
 先完整、忠实地翻译摘要，再解构研究。摘要译文保留原有结构、数字、单位和限定语，
 不插入解释或评价，不把正文或常识补进摘要；摘要未提供时写【未报告/材料未提供】。
@@ -57,7 +65,7 @@ reading_card结构如下：
   计算预测、模拟、实验机制和人群效果不自动相互推出。
 - self_test：最后只留一个针对本文关键设计或假设的自测问题，不附答案。
 不要另加总结、通用局限清单或阅读建议。
-""" + _CARD_LENGTH_GUIDANCE
+""" + _READER_GROUNDING_RULES + _CARD_LENGTH_GUIDANCE
 
 _STRUCTURED_ABSTRACT_HEADING_RE = re.compile(
     r"^\s*(?:BACKGROUND|OBJECTIVE|OBJECTIVES|PURPOSE|AIM|AIMS|METHODS?|"
@@ -399,6 +407,7 @@ class Paper:
             "criticism 三句和一个以问号结尾的 self_test；事实、推断和未报告边界保持清楚。"
             "locator 只能逐字使用上方确实存在的编号，不能臆造图号或段落号。"
             "格式化阅读卡（含标签）目标不超过650字，硬上限800字。"
+            + _READER_GROUNDING_RULES
             + _CARD_LENGTH_GUIDANCE
         )
 
@@ -629,3 +638,4 @@ class CorpusPaper:
     paths: list[str]
     key: Optional[str] = None
     url: Optional[str] = None
+
