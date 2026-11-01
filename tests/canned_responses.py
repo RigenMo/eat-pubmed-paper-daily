@@ -53,6 +53,19 @@ _READER_RESPONSE = json.dumps(
 )
 
 
+def _reader_response_with_invalid_locator() -> str:
+    payload = json.loads(_READER_RESPONSE)
+    payload["abstract_zh"] = "首轮忠实摘要译文，不应被卡片修复替换。"
+    payload["reading_card"]["evidence"][0]["locator"] = "正文段落999"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _reader_repair_response() -> str:
+    payload = json.loads(_READER_RESPONSE)
+    payload["abstract_zh"] = "第二次不应替换首轮摘要译文。"
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _make_chat_response(content: str) -> SimpleNamespace:
     return SimpleNamespace(
         choices=[
@@ -102,6 +115,31 @@ def make_stub_openai_client():
             completions=SimpleNamespace(create=_stub_chat_create),
         ),
         embeddings=SimpleNamespace(create=_stub_embeddings_create),
+    )
+
+
+def make_reader_retry_client(first_response=None, second_response=None):
+    """Return a deterministic reader client and the captured reader calls."""
+    calls = []
+    responses = [
+        first_response or _reader_response_with_invalid_locator(),
+        second_response or _reader_repair_response(),
+    ]
+
+    def create(**kwargs):
+        request_str = str(kwargs.get("messages", []))
+        if _READER_MARKER in request_str:
+            calls.append(kwargs)
+            index = min(len(calls) - 1, len(responses) - 1)
+            return _make_chat_response(responses[index])
+        return _stub_chat_create(**kwargs)
+
+    return (
+        SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+            embeddings=SimpleNamespace(create=_stub_embeddings_create),
+        ),
+        calls,
     )
 
 

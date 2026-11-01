@@ -1,4 +1,4 @@
-"""Tests for BaseReranker: scoring, sorting, time decay, unknown reranker."""
+"""Tests for BaseReranker: scoring, nearest anchors, and registration."""
 
 import numpy as np
 import pytest
@@ -37,25 +37,38 @@ def test_rerank_scores_and_sorts():
     assert ranked[0].score > ranked[1].score
 
 
-def test_rerank_time_decay_weighting():
-    corpus = make_sample_corpus(3)
+def test_rerank_uses_closest_three_without_dilution():
+    corpus = make_sample_corpus(5)
     papers = [make_sample_paper(title="P")]
 
-    # Only similar to the oldest paper (index 2 after reverse-sort by date)
-    sim = np.array([[0.0, 0.0, 1.0]])
-    reranker = StubReranker(sim)
-    ranked_old = reranker.rerank(papers, corpus)
-    score_old = ranked_old[0].score
+    # Three close anchors should determine the score; two unrelated records
+    # must not dilute it as a global corpus average would.
+    sim = np.array([[0.9, 0.8, 0.7, 0.0, 0.0]])
+    ranked = StubReranker(sim).rerank(papers, corpus)
+    assert ranked[0].score == pytest.approx(8.0)
+    assert [match["anchor_title"] for match in ranked[0].recommendation_matches] == [
+        "Corpus Paper 0",
+        "Corpus Paper 1",
+        "Corpus Paper 2",
+    ]
 
-    # Only similar to the newest paper (index 0 after reverse-sort by date)
-    papers2 = [make_sample_paper(title="P")]
-    sim2 = np.array([[1.0, 0.0, 0.0]])
-    reranker2 = StubReranker(sim2)
-    ranked_new = reranker2.rerank(papers2, corpus)
-    score_new = ranked_new[0].score
 
-    # Newest corpus paper gets higher time-decay weight, so score should be higher
-    assert score_new > score_old
+def test_rerank_anchor_fields_use_source_defaults():
+    corpus = make_sample_corpus(1)
+    corpus[0].key = "ZOTKEY"
+    corpus[0].url = "https://www.zotero.org/items/ZOTKEY"
+    papers = [make_sample_paper(title="P")]
+
+    ranked = StubReranker(np.array([[0.5]])).rerank(papers, corpus)
+    assert ranked[0].recommendation_matches == [
+        {
+            "anchor_title": "Corpus Paper 0",
+            "anchor_url": "https://www.zotero.org/items/ZOTKEY",
+            "anchor_key": "ZOTKEY",
+            "anchor_abstract": "Abstract for corpus paper 0.",
+            "similarity": 0.5,
+        }
+    ]
 
 
 def test_rerank_single_candidate_single_corpus():

@@ -2,7 +2,11 @@
 
 import pytest
 
-from tests.canned_responses import make_sample_paper, make_stub_openai_client
+from tests.canned_responses import (
+    make_reader_retry_client,
+    make_sample_paper,
+    make_stub_openai_client,
+)
 
 
 @pytest.fixture()
@@ -154,6 +158,171 @@ def test_reader_uses_program_scope_and_valid_paragraph_locations(llm_params):
     assert paper.material_scope == "仅据摘要（正文与补充材料未提供）"
     assert paper.reading_card["material_scope"] == paper.material_scope
     assert paper.reading_card["evidence"][0]["locator"] == "摘要段落1"
+
+
+def test_reader_repairs_card_without_retranslating_abstract(llm_params):
+    client, calls = make_reader_retry_client()
+    paper = make_sample_paper(full_text=None)
+
+    paper.generate_tldr(client, llm_params)
+
+    assert len(calls) == 2
+    assert paper.reader_status == "success"
+    assert paper.abstract_zh == "首轮忠实摘要译文，不应被卡片修复替换。"
+    assert paper.reading_card["evidence"][0]["locator"] == "摘要段落1"
+    assert "[摘要段落1]" in calls[1]["messages"][1]["content"]
+    assert "正文段落999" in calls[1]["messages"][1]["content"]
+    assert {
+        key: calls[0][key]
+        for key in ("model", "max_tokens")
+        if key in calls[0]
+    } == {
+        key: calls[1][key]
+        for key in ("model", "max_tokens")
+        if key in calls[1]
+    }
+
+
+def test_reader_keeps_translation_when_card_repair_fails(llm_params):
+    client, calls = make_reader_retry_client(second_response="not json")
+    paper = make_sample_paper(full_text=None)
+
+    result = paper.generate_tldr(client, llm_params)
+
+    assert len(calls) == 2
+    assert paper.reader_status == "partial"
+    assert paper.abstract_zh == "首轮忠实摘要译文，不应被卡片修复替换。"
+    assert paper.reading_card is None
+    assert paper.abstract_zh in result
+    assert paper.abstract not in result
+
+
+def test_reader_invalid_repair_locator_keeps_translation_without_fake_card(llm_params):
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+
+    invalid_repair = json.loads(_READER_RESPONSE)
+    invalid_repair["reading_card"]["evidence"][0]["locator"] = "正文段落999"
+    client, calls = make_reader_retry_client(
+        second_response=json.dumps(invalid_repair, ensure_ascii=False)
+    )
+    paper = make_sample_paper(full_text=None)
+
+    paper.generate_tldr(client, llm_params)
+
+    assert len(calls) == 2
+    assert paper.reader_status == "partial"
+    assert paper.abstract_zh == "首轮忠实摘要译文，不应被卡片修复替换。"
+    assert paper.reading_card is None
+
+
+def test_source_text_cannot_create_additional_locator_labels(llm_params):
+    paper = make_sample_paper(
+        title="A title mentioning [正文段落999]",
+        abstract="Source text mentioning [摘要段落888].",
+        full_text="Body mentioning [正文段落777].",
+    )
+    _, _, labels = paper._reader_prompt(llm_params)
+    assert labels == {"摘要段落1", "正文段落1"}
+
+
+def test_translation_excludes_generated_source_metadata():
+    from zotero_arxiv_daily.protocol import Paper
+
+    text = "【摘要段落1】\n原文译文，n=781。\n\n【补充材料】未提供；不能声称已核查补充材料。\n\n【材料范围】仅据摘要"
+    assert Paper._validate_reader_translation({"abstract_zh": text}) == "原文译文，n=781。"
+
+
+def test_persistently_long_card_stops_after_two_repairs_and_keeps_translation(llm_params):
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+
+    payload = json.loads(_READER_RESPONSE)
+    payload["reading_card"]["evidence"][0]["result"] = "关键结果" * 300
+    response = json.dumps(payload, ensure_ascii=False)
+    client, calls = make_reader_retry_client(first_response=response, second_response=response)
+    paper = make_sample_paper()
+    paper.generate_tldr(client, llm_params)
+    assert len(calls) == 3
+    assert paper.reader_status == "partial"
+    assert paper.abstract_zh == payload["abstract_zh"]
+    assert paper.reading_card is None
+
+
+def test_reader_rejects_fabricated_figure_beside_valid_paragraph():
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+    from zotero_arxiv_daily.protocol import Paper
+
+    payload = json.loads(_READER_RESPONSE)
+    payload["reading_card"]["evidence"][0]["locator"] = "摘要段落1，图99/正文第99页"
+    with pytest.raises(ValueError, match="locator"):
+        Paper._validate_reader_payload(payload, "仅据摘要", {"摘要段落1"})
+
+
+def test_reader_does_not_accept_finish_reason_length():
+    from types import SimpleNamespace
+
+    def create(**kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"abstract_zh":"不应接受","reading_card":{}}'),
+                    finish_reason="length",
+                )
+            ]
+        )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    paper = make_sample_paper()
+
+    paper.generate_tldr(client, {"generation_kwargs": {"model": "kimi-k3", "max_tokens": 65536}})
+
+    assert paper.reader_status == "failed"
+    assert paper.abstract_zh is None
+    assert paper.reading_card is None
+
+
+def test_reader_malformed_first_json_does_not_trigger_card_repair(llm_params):
+    client, calls = make_reader_retry_client(
+        first_response="not json",
+    )
+    paper = make_sample_paper()
+
+    paper.generate_tldr(client, llm_params)
+
+    assert len(calls) == 1
+    assert paper.reader_status == "failed"
+    assert paper.abstract_zh is None
+    assert paper.reading_card is None
+
+
+def test_reader_numbers_explicit_abstract_headings_without_fake_paragraphs(llm_params):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return make_stub_openai_client().chat.completions.create(**kwargs)
+
+    from types import SimpleNamespace
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    paper = make_sample_paper(
+        abstract=(
+            "BACKGROUND: 问题背景。\n"
+            "METHODS: 研究方法。\n"
+            "RESULTS: 主要结果。\n"
+            "CONCLUSIONS: 结论范围。"
+        ),
+        full_text=None,
+    )
+
+    paper.generate_tldr(client, llm_params)
+
+    prompt = captured["messages"][1]["content"]
+    assert "[摘要段落1]" in prompt
+    assert "[摘要段落4]" in prompt
+    assert "[摘要段落5]" not in prompt
 
 
 def test_body_only_failure_preserves_the_fact_that_body_material_exists(llm_params):

@@ -103,13 +103,12 @@ def _metric_value(metrics: Any, *keys: str) -> Any:
     if metrics is None:
         return None
     for key in keys:
-        value = getattr(metrics, key, None)
-        if value is not None:
-            return value
+        if hasattr(metrics, key):
+            return getattr(metrics, key)
     return None
 
 
-def _metric_text(value: Any, unknown: str = "未核实") -> str:
+def _metric_text(value: Any, unknown: str = "未提供") -> str:
     text = _text_value(value).strip()
     return escape(text, quote=False) if text else unknown
 
@@ -128,18 +127,19 @@ def _metric_badge(
     return (
         '<span style="display:inline-block; margin:2px 5px 2px 0; padding:5px 8px; '
         'border-radius:4px; background-color:#fff3cd; color:#664d03; font-size:12px; '
-        'line-height:1.45; max-width:100%; box-sizing:border-box; overflow-wrap:anywhere;">'
+        'line-height:1.45; max-width:100%; box-sizing:border-box; white-space:normal; '
+        'overflow-wrap:anywhere; word-break:break-word;">'
         f"<strong>{escape(label, quote=False)}：{value}</strong>{source_link}</span>"
     )
 
 
-def _with_year(value: Any, year: Any, unknown_year: str = "年份未核实") -> str:
-    value_text = _metric_text(value)
-    if value_text == "未核实":
-        return f"未核实（{unknown_year}）"
+def _with_year(value: Any, year: Any) -> str:
+    """Render a metric and append only a year that was actually supplied."""
+    value_text = _metric_text(value, "未提供")
     year_text = _text_value(year).strip()
-    year_text = year_text or unknown_year
-    return f"{value_text}（{escape(year_text, quote=False)}）"
+    if year_text:
+        return f"{value_text}（{escape(year_text, quote=False)}）"
+    return value_text
 
 
 def _level_value(value: Any, level: str) -> Any:
@@ -174,23 +174,14 @@ def _build_journal_metrics_html(metrics: Any) -> str:
     jcr_year = _metric_value(metrics, "jcr_year")
     jcr_source = _metric_value(metrics, "jcr_source")
 
-    # The API provides the latest values without metric years. A lookup date
-    # is not a JCR/CAS data year, and must never be substituted for one.
-    provider = _metric_value(metrics, "metrics_provider")
-    query_source = "https://www.easyscholar.cc/console/query"
-    jif_unknown_year = "年份未提供" if provider == "EasyScholar" and jif_source == query_source else "年份未核实"
-    jcr_unknown_year = "年份未提供" if provider == "EasyScholar" and jcr_source == query_source else "年份未核实"
-    cas_unknown_year = "年份未提供" if provider == "EasyScholar" and cas_source == query_source else "年份未核实"
-
-    category_unknown = "学科未提供" if jcr_unknown_year == "年份未提供" else "类别未核实"
-    category_text = _metric_text(jcr_category, category_unknown)
-    quartile_text = _metric_text(jcr_quartile, "分区未核实")
-    if jcr_category is None and jcr_quartile is None and jcr_year is None:
-        jcr_value = "未核实（年份未核实）"
-    else:
-        jcr_value = f"{category_text} / {quartile_text}"
-        jcr_year_text = _text_value(jcr_year).strip() or jcr_unknown_year
-        jcr_value += f"（{escape(jcr_year_text, quote=False)}）"
+    jcr_parts = []
+    if _text_value(jcr_category).strip():
+        jcr_parts.append(_metric_text(jcr_category, "未提供"))
+    if _text_value(jcr_quartile).strip():
+        jcr_parts.append(_metric_text(jcr_quartile, "未提供"))
+    jcr_value = " / ".join(jcr_parts) or "未提供"
+    if _text_value(jcr_year).strip():
+        jcr_value += f"（{escape(_text_value(jcr_year).strip(), quote=False)}）"
 
     cas_badges = []
     has_cas_mapping = isinstance(cas_category, Mapping) or isinstance(cas_quartile, Mapping)
@@ -198,12 +189,14 @@ def _build_journal_metrics_html(metrics: Any) -> str:
         cas_category is not None or cas_quartile is not None
     )
     if has_cas_scalar:
-        scalar_value = (
-            f"{_metric_text(cas_category, '类别未注明')} / "
-            f"{_metric_text(cas_quartile, '分区未注明')}"
-        )
-        scalar_year = _text_value(cas_year).strip() or cas_unknown_year
-        scalar_value += f"（{escape(scalar_year, quote=False)}）"
+        scalar_parts = []
+        if _text_value(cas_category).strip():
+            scalar_parts.append(_metric_text(cas_category, "未提供"))
+        if _text_value(cas_quartile).strip():
+            scalar_parts.append(_metric_text(cas_quartile, "未提供"))
+        scalar_value = " / ".join(scalar_parts) or "未提供"
+        if _text_value(cas_year).strip():
+            scalar_value += f"（{escape(_text_value(cas_year).strip(), quote=False)}）"
         cas_badges.append(_metric_badge("中科院分区", scalar_value, cas_source))
     for level, label in (
         ("big", "中科院分区大类"),
@@ -215,36 +208,30 @@ def _build_journal_metrics_html(metrics: Any) -> str:
             continue
         category = _level_value(cas_category, level)
         quartile = _level_value(cas_quartile, level)
-        if category is None and quartile is None and cas_year is None:
-            cas_value = "未核实（年份未核实）"
-        else:
-            # EasyScholar's CAS labels already include the subject name and
-            # partition. Preserve all small-subject labels without aggregation.
-            if category is None and quartile is not None:
-                cas_value = _metric_text(quartile)
-            else:
-                cas_value = f"{_metric_text(category, '类别未核实')} / {_metric_text(quartile, '分区未核实')}"
-            cas_year_text = _text_value(cas_year).strip() or cas_unknown_year
-            cas_value += f"（{escape(cas_year_text, quote=False)}）"
+        # EasyScholar's CAS labels already include the subject name and
+        # partition. Preserve all small-subject labels without aggregation.
+        cas_parts = []
+        if _text_value(category).strip():
+            cas_parts.append(_metric_text(category, "未提供"))
+        if _text_value(quartile).strip():
+            cas_parts.append(_metric_text(quartile, "未提供"))
+        cas_value = " / ".join(cas_parts) or "未提供"
+        if _text_value(cas_year).strip():
+            cas_value += f"（{escape(_text_value(cas_year).strip(), quote=False)}）"
         cas_badges.append(
             _metric_badge(label, cas_value, cas_source)
         )
 
-    jif_value = _with_year(jif, jif_year, jif_unknown_year)
+    jif_value = _with_year(jif, jif_year)
     badges = [
         _metric_badge("JIF(影响因子)", jif_value, jif_source),
         _metric_badge("JCR分区", jcr_value, jcr_source),
         *cas_badges,
     ]
-    query_notice = ""
-    if provider == "EasyScholar":
-        queried_at = _metric_text(_metric_value(metrics, "queried_at"), "查询日期未提供")
-        query_notice = f'<div style="margin-top:4px; color:#666666;">EasyScholar 查询日期：{queried_at}（UTC，非指标年份）</div>'
     return (
         '<tr><td style="padding:5px 16px 8px; font-size:12px; line-height:1.5;">'
         '<div style="margin-bottom:3px; color:#555555;"><strong>期刊指标</strong></div>'
         + "".join(badges)
-        + query_notice
         + "</td></tr>"
     )
 
@@ -255,7 +242,9 @@ def get_empty_html() -> str:
         'style="font-family:Arial, \'Microsoft YaHei\', sans-serif; border:1px solid #ddd; '
         'border-radius:8px; background-color:#f9f9f9;">'
         '<tr><td style="padding:16px; font-size:20px; font-weight:bold; color:#333333;">'
-        "No Papers Today. Take a Rest!"
+        "本次没有符合筛选条件的文献"
+        "<br><span style=\"font-size:14px; font-weight:normal; color:#666666;\">"
+        "未放宽主题相关性或期刊条件来补足数量</span>"
         "</td></tr></table>"
     )
 
@@ -410,6 +399,12 @@ def _build_fallback_rows(
 ) -> str:
     """Render legacy TLDR or an explicit non-translated fallback."""
     original = _text_value(original_abstract).strip()
+    if _text_value(abstract_zh).strip():
+        return (
+            _section_row("一、原文摘要中文版", _render_paragraphs(abstract_zh))
+            + _section_row("二、精读卡", _render_paragraphs("精读卡未生成；摘要译文已保留。"))
+        )
+
     if _is_generation_failure(tldr):
         failure = _render_paragraphs(_text_value(tldr).splitlines()[0])
         if material_scope:
@@ -420,18 +415,163 @@ def _build_fallback_rows(
             + _section_row("摘要原文（未完成翻译）", original_html)
         )
 
-    if _text_value(abstract_zh).strip():
-        return (
-            _section_row("一、原文摘要中文版", _render_paragraphs(abstract_zh))
-            + _section_row("二、精读卡", _render_paragraphs("【未报告/材料未提供】精读卡未生成。"))
-        )
-
     legacy = _render_paragraphs(tldr)
     if legacy:
         return _section_row("TLDR", legacy)
     if original:
         return _section_row("摘要原文（未完成翻译）", _render_paragraphs(original))
     return ""
+
+
+_PUBLICATION_EVENT_LABELS = {
+    "received": "投稿",
+    "submitted": "投稿",
+    "submission": "投稿",
+    "投稿": "投稿",
+    "revised": "修回",
+    "revision": "修回",
+    "修回": "修回",
+    "accepted": "接收",
+    "accept": "接收",
+    "接收": "接收",
+    "aheadofprint": "在线发表",
+    "epublish": "在线发表",
+    "electronic": "在线发表",
+    "online": "在线发表",
+    "onlinefirst": "在线发表",
+    "onlinepublished": "在线发表",
+    "在线发表": "在线发表",
+    "ppublish": "卷期发表",
+    "print": "卷期发表",
+    "printpublished": "卷期发表",
+    "卷期发表": "卷期发表",
+    "publication": "发表",
+    "发表": "发表",
+}
+_PUBLICATION_INDEX_EVENTS = {
+    "entrez",
+    "medline",
+    "medlineindex",
+    "medlineindexed",
+    "pubmed",
+    "pubmednotmedline",
+    "pmc",
+    "pmcrelease",
+    "pmcreleased",
+}
+
+
+def _publication_event_label(event: Any) -> str:
+    raw = _text_value(event).strip()
+    if not raw:
+        return ""
+    normalized = raw.casefold().replace(" ", "").replace("_", "").replace("-", "")
+    if normalized in _PUBLICATION_INDEX_EVENTS or normalized.startswith(
+        ("entrez", "medline", "pubmed", "pmc")
+    ):
+        return ""
+    return _PUBLICATION_EVENT_LABELS.get(raw, _PUBLICATION_EVENT_LABELS.get(normalized, ""))
+
+
+def _build_publication_html(
+    publication_date: Any,
+    publication_history: Any,
+    *,
+    show_missing: bool = False,
+) -> str:
+    """Render actual dates only; preserve the chronology supplied upstream."""
+    publication_text = _text_value(publication_date).strip()
+    publication_source_url = ""
+    history_items = []
+    if isinstance(publication_history, list):
+        for item in publication_history:
+            if not isinstance(item, Mapping):
+                continue
+            date_text = _text_value(item.get("date")).strip()
+            label = _publication_event_label(item.get("event"))
+            if not date_text or not label:
+                continue
+            source_url = _safe_url(item.get("source"))
+            # Keep the publication date in the chronological history too.
+            if label == "发表" and publication_text and date_text == publication_text:
+                publication_source_url = publication_source_url or source_url
+            date_html = escape(date_text, quote=False)
+            if source_url:
+                date_html += (
+                    f' <a href="{source_url}" style="color:#2c5f8a; font-size:11px;">来源</a>'
+                )
+            history_items.append(
+                f'<span style="display:inline-block; margin:0 10px 3px 0;">'
+                f"<strong>{escape(label, quote=False)}</strong>：{date_html}</span>"
+            )
+
+    rows = []
+    if publication_text:
+        publication_date_html = escape(publication_text, quote=False)
+        if publication_source_url:
+            publication_date_html += (
+                f' <a href="{publication_source_url}" style="color:#2c5f8a; font-size:11px;">来源</a>'
+            )
+        rows.append(
+            '<div style="margin:2px 0; color:#555555;">'
+            f"<strong>首次发表/发表日期：</strong>{publication_date_html}</div>"
+        )
+    if history_items:
+        rows.append(
+            '<div style="margin:2px 0; color:#555555;">'
+            "<strong>出版历程：</strong>"
+            + ' <span aria-hidden="true">→</span> '.join(history_items)
+            + "</div>"
+        )
+    if not rows and show_missing:
+        rows.append(
+            '<div style="margin:2px 0; color:#777777;">发表日期未提供</div>'
+        )
+    if not rows:
+        return ""
+    return (
+        '<tr><td style="padding:2px 16px 4px; font-size:12px; line-height:1.5; '
+        'overflow-wrap:anywhere; white-space:normal;">'
+        + "".join(rows)
+        + "</td></tr>"
+    )
+
+
+def _build_recommendation_html(matches: Any) -> str:
+    """Render verified Zotero relationship explanations without raw scores."""
+    if not isinstance(matches, list):
+        return ""
+
+    entries = []
+    for match in matches:
+        if not isinstance(match, Mapping):
+            continue
+        reason = _text_value(match.get("reason")).strip()
+        title = _text_value(match.get("anchor_title")).strip()
+        anchor_url = _safe_url(match.get("anchor_url"))
+        if not reason and not title:
+            continue
+
+        source_title = _render_rich_text(title) if title else "Zotero 文献"
+        if anchor_url:
+            source_title = f'<a href="{anchor_url}">{source_title}</a>'
+        reason_html = _render_rich_text(reason)
+        if reason_html and title:
+            reason_html += f"（来源：{source_title}）"
+        elif reason_html:
+            reason_html += f"（来源：{source_title}）" if anchor_url else ""
+        else:
+            reason_html = source_title
+        entries.append(
+            '<p style="margin:4px 0; font-size:13px; line-height:1.6; '
+            'overflow-wrap:anywhere;">'
+            + reason_html
+            + "</p>"
+        )
+
+    if not entries:
+        return ""
+    return _section_row("与 Zotero 的关系", "".join(entries))
 
 
 def get_block_html(
@@ -450,6 +590,10 @@ def get_block_html(
     material_scope: Any = None,
     journal_metrics: Any = None,
     original_abstract: str = None,
+    publication_date: Any = None,
+    publication_history: Any = None,
+    recommendation_matches: Any = None,
+    show_missing_date: bool = False,
 ):
     """Build one valid table card; the positional legacy signature is kept."""
     source_badge = _build_source_badge(source, journal)
@@ -480,10 +624,15 @@ def get_block_html(
 
     structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope)
     report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
-    # Keep the four badges visible even when journal metadata is absent; the
-    # explicit “未核实” values prevent readers from mistaking missing data for
-    # an inferred ranking.
+    # Keep the metric badges visible even when values are absent; ``未提供``
+    # makes missing metadata explicit without inferring a year or category.
     metrics_row = _build_journal_metrics_html(journal_metrics)
+    publication_row = _build_publication_html(
+        publication_date,
+        publication_history,
+        show_missing=show_missing_date,
+    )
+    recommendation_row = _build_recommendation_html(recommendation_matches)
     block_template = """
     <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"
       style="width:100%; max-width:900px; margin:0 auto; font-family:Arial, 'Microsoft YaHei', sans-serif; border:1px solid #dddddd; border-radius:8px; background-color:#f9f9f9;">
@@ -498,15 +647,10 @@ def get_block_html(
       <tr>
         <td style="padding:4px 16px; font-size:14px; color:#666666; line-height:1.6;">
           {authors}
-          <br>
-          <i>{affiliations}</i>
         </td>
       </tr>
-      <tr>
-        <td style="padding:8px 16px; font-size:14px; color:#333333; line-height:1.6;">
-          <strong>Relevance:</strong> {rate} {stars}
-        </td>
-      </tr>
+      {publication_row}
+      {recommendation_row}
       <tr>
         <td style="padding:8px 16px 10px;">
           {article_link}
@@ -521,9 +665,8 @@ def get_block_html(
         source_row=source_row,
         metrics_row=metrics_row,
         authors=_render_rich_text(authors),
-        affiliations=_render_rich_text(affiliations),
-        rate=_render_rich_text(rate),
-        stars=stars or "",
+        publication_row=publication_row,
+        recommendation_row=recommendation_row,
         article_link=article_link,
         report_rows=report_rows,
     )
@@ -573,39 +716,32 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
         parts.append(get_summary_html(summary))
 
     for paper in papers:
-        rate = round(paper.score, 1) if paper.score is not None else "Unknown"
-        stars = get_stars(paper.score) if paper.score is not None else ""
-        author_list = list(paper.authors or [])
-        if len(author_list) <= 5:
-            authors = ", ".join(author_list)
+        if isinstance(paper.authors, (list, tuple)):
+            author_list = list(paper.authors)
         else:
-            authors = ", ".join(author_list[:3] + ["..."] + author_list[-2:])
-
-        if paper.affiliations is not None:
-            affiliation_list = list(paper.affiliations)[:5]
-            affiliations = ", ".join(affiliation_list)
-            if len(paper.affiliations) > 5:
-                affiliations += ", ..."
-        else:
-            affiliations = "Unknown Affiliation"
+            author_list = [paper.authors] if _text_value(paper.authors).strip() else []
+        authors = author_list[0] if author_list else "作者未提供"
 
         parts.append(
             get_block_html(
                 paper.title,
                 authors,
-                rate,
+                "",
                 getattr(paper, "tldr", None),
                 _paper_article_url(paper),
-                affiliations=affiliations,
+                affiliations=None,
                 source=paper.source,
                 journal=paper.journal,
-                stars=stars,
                 title_zh=paper.title_zh,
                 abstract_zh=getattr(paper, "abstract_zh", None),
                 reading_card=getattr(paper, "reading_card", None),
                 material_scope=getattr(paper, "material_scope", None),
                 journal_metrics=getattr(paper, "journal_metrics", None),
                 original_abstract=getattr(paper, "abstract", None),
+                publication_date=getattr(paper, "publication_date", None),
+                publication_history=getattr(paper, "publication_history", None),
+                recommendation_matches=getattr(paper, "recommendation_matches", None),
+                show_missing_date=True,
             )
         )
 

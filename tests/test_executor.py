@@ -440,3 +440,113 @@ def test_run_no_papers_send_empty_true(config, monkeypatch):
     assert len(sent) == 1, "Email should be sent even with no papers when send_empty=true"
     _, _, body = sent[0]
     assert "text/html" in body
+
+
+def _delivery_executor(config, papers):
+    from types import SimpleNamespace
+
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor._search_mode = 1
+    executor._keywords_raw = None
+    executor._structured_keywords = None
+    executor.retrievers = {"stub": SimpleNamespace(retrieve_papers=lambda: papers)}
+    executor.reranker = SimpleNamespace(rerank=lambda candidates, *args, **kwargs: candidates)
+    executor.openai_client = object()
+    executor.generate_email_summary = lambda candidates: ""
+    return executor
+
+
+def test_all_failed_reading_cards_stop_before_smtp_even_if_translation_exists(config, monkeypatch):
+    from tests.canned_responses import make_sample_paper
+
+    config.recommendations.require_cards = True
+    paper = make_sample_paper()
+    executor = _delivery_executor(config, [paper])
+
+    def partial_reader(self, *args):
+        self.abstract_zh = "已经生成的摘要译文。"
+        self.reading_card = None
+        self.reader_status = "partial"
+
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_tldr", partial_reader)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda *args: pytest.fail("must not send failed reports"))
+
+    with pytest.raises(RuntimeError, match="No complete reading cards"):
+        executor.run()
+    assert paper.abstract_zh == "已经生成的摘要译文。"
+
+
+def test_no_send_preflight_prepares_the_real_mail_without_smtp(config, monkeypatch):
+    from tests.canned_responses import make_sample_paper
+
+    config.recommendations.require_cards = True
+    paper = make_sample_paper()
+    executor = _delivery_executor(config, [paper])
+
+    def completed_reader(self, *args):
+        self.abstract_zh = "译文。"
+        self.reading_card = {"essence": ["示例。"]}
+
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_tldr", completed_reader)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_title_translation", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda *args, **kwargs: "prepared HTML")
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda *args: pytest.fail("preflight cannot send"))
+
+    assert executor.run(send_mail=False) == 1
+    assert executor.last_papers == [paper]
+    assert executor.last_email_content == "prepared HTML"
+
+
+def test_zotero_only_mode_builds_source_queries_before_pubmed_retrieval(config, monkeypatch):
+    from types import SimpleNamespace
+    from zotero_arxiv_daily.recommendations import build_zotero_queries
+
+    executor = _delivery_executor(config, [])
+    executor._search_mode = 5
+    reference = CorpusPaper("Dietary patterns and heart failure", "Source abstract.", datetime(2026, 1, 1), [])
+    executor.fetch_zotero_corpus = lambda: [reference]
+    executor.filter_corpus = lambda corpus: corpus
+    injected = []
+    def source_queries(corpus, *, openai_client, llm_params):
+        assert corpus == [reference]
+        assert openai_client is executor.openai_client
+        assert llm_params is config.llm
+        return build_zotero_queries(corpus)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.build_zotero_queries", source_queries)
+    executor.retrievers = {"pubmed": SimpleNamespace(
+        set_pubmed_queries=lambda queries: injected.extend(queries),
+        retrieve_papers=lambda: [],
+    )}
+
+    assert executor.run() == 0
+    assert injected and all("[tiab]" in query for query in injected)
+
+
+def test_related_if_eligible_papers_prioritize_publication_date(config, monkeypatch):
+    from tests.canned_responses import make_sample_paper
+
+    config.recommendations.enabled = True
+    config.recommendations.max_papers = 2
+    config.recommendations.max_per_journal = 2
+    newer = make_sample_paper(title="Newer", publication_date="2026-11-01")
+    older = make_sample_paper(title="Older", publication_date="2026-10-25")
+    executor = _delivery_executor(config, [older, newer])
+    executor._search_mode = 2
+    executor.fetch_zotero_corpus = lambda: [CorpusPaper("Anchor", "Abstract", datetime(2026, 1, 1), [])]
+    executor.filter_corpus = lambda corpus: corpus
+    checked = []
+
+    def verify(papers, *args, **kwargs):
+        checked.extend(papers)
+        return papers
+
+    monkeypatch.setattr("zotero_arxiv_daily.executor.enrich_journal_metrics", lambda papers, *args: papers)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.verify_recommendations", verify)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_tldr", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_title_translation", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda *args, **kwargs: "HTML")
+
+    assert executor.run(send_mail=False) == 2
+    assert checked == [newer, older]
+    assert executor.last_papers == [newer, older]

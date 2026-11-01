@@ -9,42 +9,36 @@ def test_render_email_with_papers():
     html = render_email(papers)
     assert "Sample Paper Title" in html
     assert "A great paper." in html
-    assert "MIT" in html
+    assert "MIT" not in html
 
 
 def test_render_email_empty_list():
     html = render_email([])
-    assert "No Papers Today" in html
+    assert "本次没有符合筛选条件的文献" in html
+    assert "未放宽主题相关性或期刊条件来补足数量" in html
 
 
-def test_render_email_author_truncation():
+def test_render_email_shows_only_first_author():
     authors = [f"Author {i}" for i in range(10)]
     paper = make_sample_paper(authors=authors, score=7.0, tldr="ok")
     html = render_email([paper])
     assert "Author 0" in html
-    assert "Author 1" in html
-    assert "Author 2" in html
-    assert "..." in html
-    assert "Author 8" in html
-    assert "Author 9" in html
-    # Middle authors should be truncated
-    assert "Author 5" not in html
+    for author in authors[1:]:
+        assert author not in html
 
 
-def test_render_email_affiliation_truncation():
+def test_render_email_omits_affiliations_even_when_provided():
     affiliations = [f"Uni {i}" for i in range(8)]
     paper = make_sample_paper(affiliations=affiliations, score=7.0, tldr="ok")
     html = render_email([paper])
-    assert "Uni 0" in html
-    assert "Uni 4" in html
-    assert "..." in html
-    assert "Uni 7" not in html
+    for affiliation in affiliations:
+        assert affiliation not in html
 
 
 def test_render_email_no_affiliations():
     paper = make_sample_paper(affiliations=None, score=7.0, tldr="ok")
     html = render_email([paper])
-    assert "Unknown Affiliation" in html
+    assert "Unknown Affiliation" not in html
 
 
 def test_render_email_falls_back_to_url_when_pdf_url_missing():
@@ -70,10 +64,11 @@ def test_render_email_omits_translated_title_row_when_absent():
     assert "示例论文标题" not in html
 
 
-def test_render_email_shows_stars_for_high_score():
+def test_render_email_hides_legacy_score_and_stars():
     paper = make_sample_paper(score=8.5, tldr="ok")
     html = render_email([paper])
-    assert '<span class="full-star">' in html
+    assert "Relevance" not in html
+    assert '<span class="full-star">' not in html
 
 
 def test_render_email_no_stars_for_low_score():
@@ -103,15 +98,15 @@ def test_get_block_html_contains_all_fields():
     html = get_block_html("Title", "Auth", "3.5", "Summary", "http://pdf.url", "MIT")
     assert "Title" in html
     assert "Auth" in html
-    assert "3.5" in html
     assert "Summary" in html
     assert "http://pdf.url" in html
-    assert "MIT" in html
+    assert "MIT" not in html
+    assert "Relevance" not in html
 
 
 def test_get_empty_html():
     html = get_empty_html()
-    assert "No Papers Today" in html
+    assert "本次没有符合筛选条件的文献" in html
 
 
 def test_render_email_escapes_content_and_keeps_basic_markdown():
@@ -143,7 +138,7 @@ def test_render_email_escapes_content_and_keeps_basic_markdown():
     assert "<strong>重点</strong>" not in html  # legacy TLDR is hidden by the structured report
     assert "<strong>核心</strong>" in html
     assert "<strong>摘要标题</strong>" in html
-    assert "<br>" in html
+    assert "<p style=" in html
 
 
 def test_render_email_includes_chinese_abstract_and_reading_card_sections():
@@ -202,17 +197,19 @@ def test_render_email_shows_verified_journal_metric_badges_and_safe_source():
     assert ">PDF<" not in html
 
 
-def test_render_email_marks_missing_metrics_unverified_without_inference():
+def test_render_email_marks_missing_metrics_as_not_provided_without_inference():
     paper = make_sample_paper(score=7.0, tldr="TLDR", journal="Unknown Journal")
     paper.journal_metrics = {}
 
     html = render_email([paper])
 
-    assert "JIF(影响因子)：未核实" in html
-    assert "JCR分区：未核实" in html
-    assert "中科院分区大类：未核实" in html
-    assert "中科院分区小类：未核实" in html
+    assert "JIF(影响因子)：未提供" in html
+    assert "JCR分区：未提供" in html
+    assert "中科院分区大类：未提供" in html
+    assert "中科院分区小类：未提供" in html
     assert "Q1" not in html
+    assert "年份未提供" not in html
+    assert "年份未核实" not in html
 
 
 def test_render_email_rejects_unsafe_article_and_metric_source_urls():
@@ -305,18 +302,31 @@ def test_render_email_always_shows_unverified_metric_badges_without_journal():
     assert "中科院分区大类" in html
     assert "中科院分区小类" in html
     assert html.count("来源未核实") >= 4
-    assert html.count("年份未核实") >= 4
+    assert "未提供" in html
+    assert "年份未核实" not in html
+    assert "年份未提供" not in html
 
 
 def test_generated_report_is_rendered_once_with_program_material_scope():
-    from tests.canned_responses import make_stub_openai_client
-
     paper = make_sample_paper(full_text=None)
-    paper.generate_tldr(make_stub_openai_client(), {})
+    paper.abstract_zh = "这是程序生成的摘要译文。"
+    paper.material_scope = "仅据摘要（正文与补充材料未提供）"
+    paper.reading_card = {
+        "essence": ["本质一", "本质二"],
+        "design": {
+            "objects_data": "对象与数据",
+            "task_definitions": "任务与定义",
+            "implementation": "实现与比较",
+            "comparison_validation_scope": "验证与范围",
+        },
+        "evidence": [],
+        "innovation": ["创新一", "创新二"],
+        "criticism": ["批判一", "批判二", "批判三"],
+        "self_test": "自测问题？",
+    }
 
     html = render_email([paper])
 
-    assert paper.reading_card is not None
     assert html.count(paper.abstract_zh) == 1
     assert html.count(paper.reading_card["self_test"]) == 1
     assert html.count("一、原文摘要中文版") == 1
@@ -340,9 +350,90 @@ def test_easyscholar_values_show_all_cas_subjects_without_inventing_years():
 
     html = render_email([paper])
 
-    assert "25.0（年份未提供）" in html
-    assert "学科未提供 / Q1（年份未提供）" in html
-    assert "细胞生物学1区/老年医学1区/神经科学1区。" in html
-    assert "医学1区（年份未提供）" in html
-    assert "EasyScholar 查询日期：2026-11-01（UTC，非指标年份）" in html
+    assert "JIF(影响因子)：25.0" in html
     assert "25.0（2025）" not in html
+    assert "Q1" in html
+    assert "学科未提供" not in html
+    assert "细胞生物学1区/老年医学1区/神经科学1区。" in html
+    assert "医学1区" in html
+    assert "年份未提供" not in html
+    assert "年份未核实" not in html
+    assert "EasyScholar 查询日期" not in html
+
+
+def test_render_email_shows_actual_publication_history_and_ignores_pubmed_index_dates():
+    paper = make_sample_paper(tldr="TLDR", abstract_zh="中文摘要")
+    paper.publication_date = "2026-10-31"
+    paper.publication_history = [
+        {"event": "received", "date": "2025-01-03", "source": "https://publisher.example/history"},
+        {"event": "revised", "date": "2025-04-05", "source": "https://publisher.example/history"},
+        {"event": "accepted", "date": "2025-05-06", "source": "https://publisher.example/history"},
+        {"event": "aheadofprint", "date": "2026-10-31", "source": "https://publisher.example/history"},
+        {"event": "ppublish", "date": "2027-01-01", "source": "https://publisher.example/history"},
+        {"event": "pubmed", "date": "2026-11-02", "source": "https://pubmed.example/index"},
+    ]
+
+    html = render_email([paper])
+
+    assert "首次发表/发表日期：" in html
+    assert "2026-10-31" in html
+    for label in ("投稿", "修回", "接收", "在线发表", "卷期发表"):
+        assert label in html
+    assert "2026-11-02" not in html
+    assert 'href="https://publisher.example/history"' in html
+    assert 'href="https://pubmed.example/index"' not in html
+    assert html.index("投稿") < html.index("修回") < html.index("接收") < html.index("在线发表") < html.index("卷期发表")
+    assert html.index("首次发表/发表日期") < html.index("一、原文摘要中文版")
+
+
+def test_render_email_shows_zotero_reason_and_safe_source_title_without_raw_match_fields():
+    paper = make_sample_paper(tldr="TLDR")
+    paper.recommendation_matches = [
+        {
+            "anchor_title": "Zotero anchor title",
+            "anchor_url": "https://zotero.example/item/1?x=1&y=2",
+            "reason": "同一研究问题和人群定义，可作为直接比较依据。",
+            "candidate_quote": "candidate quote must stay hidden",
+            "anchor_quote": "anchor quote must stay hidden",
+            "similarity": 0.91,
+            "anchor_key": "secret-raw-key",
+            "anchor_abstract": "secret abstract must stay hidden",
+        }
+    ]
+
+    html = render_email([paper])
+
+    assert "与 Zotero 的关系" in html
+    assert "同一研究问题和人群定义，可作为直接比较依据。" in html
+    assert "Zotero anchor title" in html
+    assert 'href="https://zotero.example/item/1?x=1&amp;y=2"' in html
+    for hidden in ("candidate quote must stay hidden", "anchor quote must stay hidden", "secret-raw-key", "secret abstract must stay hidden", "0.91"):
+        assert hidden not in html
+    assert "Relevance" not in html
+    assert "full-star" not in html
+
+
+def test_render_email_partial_translation_is_kept_when_reading_card_missing():
+    paper = make_sample_paper(
+        abstract_zh="这是已经生成的中文摘要译文。",
+        reading_card=None,
+        tldr="二、精读卡\n精读卡生成失败：已保留摘要中文翻译，未生成精读卡。",
+    )
+
+    html = render_email([paper])
+
+    assert "一、原文摘要中文版" in html
+    assert "这是已经生成的中文摘要译文。" in html
+    assert "二、精读卡" in html
+    assert "精读卡未生成" in html
+    assert "摘要原文（未完成翻译）" not in html
+
+
+def test_render_email_reports_missing_publication_date_once():
+    paper = make_sample_paper(tldr="TLDR")
+
+    html = render_email([paper])
+
+    assert html.count("发表日期未提供") == 1
+    assert "年份未提供" not in html
+    assert "年份未核实" not in html

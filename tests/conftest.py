@@ -48,7 +48,10 @@ def _base_config():
                 # Generic canned PubMed fixtures use non-whitelisted journals;
                 # journal-specific tests explicitly enable the production gate.
                 "journals.enabled=false",
+                "journals.mode=whitelist",
                 "journals.easyscholar.api_key=",
+                "recommendations.enabled=false",
+                "recommendations.require_cards=false",
             ],
         )
     return cfg
