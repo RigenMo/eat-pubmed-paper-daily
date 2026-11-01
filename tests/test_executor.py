@@ -118,6 +118,94 @@ def test_executor_passes_configured_llm_timeout_to_openai(config, monkeypatch):
     assert captured["timeout"] == 1234.0
 
 
+def test_executor_applies_debug_limit_after_reranking(config, monkeypatch):
+    """Debug mode limits the ranked delivery set, not PubMed retrieval."""
+    from omegaconf import open_dict
+    from tests.canned_responses import make_sample_paper, make_stub_openai_client
+
+    with open_dict(config):
+        config.executor.debug = True
+        config.executor.max_paper_num = 100
+        config.executor.source = ["stub"]
+        config.search.mode = 5
+
+    class StubRetriever:
+        def retrieve_papers(self):
+            return [make_sample_paper(title=f"Paper {i}") for i in range(10)]
+
+    class StubReranker:
+        def rerank(self, papers, corpus, keyword_query=None, favorite_journals=None):
+            assert len(papers) == 10
+            return papers
+
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda corpus: corpus
+    executor._search_mode = 5
+    executor._keywords_raw = None
+    executor._structured_keywords = None
+    executor.retrievers = {"stub": StubRetriever()}
+    executor.reranker = StubReranker()
+    executor.openai_client = make_stub_openai_client()
+
+    generated = []
+    monkeypatch.setattr(
+        "zotero_arxiv_daily.protocol.Paper.generate_tldr",
+        lambda self, client, llm: generated.append(self.title),
+    )
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_affiliations", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_title_translation", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda papers, summary=None: len(papers))
+    sent = []
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda cfg, body: sent.append(body))
+
+    result = executor.run()
+
+    assert result == 5
+    assert len(generated) == 5
+    assert sent == [5]
+
+
+def test_executor_strict_journal_gate_does_not_allow_arxiv_bypass(config, monkeypatch):
+    """With the whitelist enabled, non-PubMed candidates cannot reach ranking."""
+    from omegaconf import open_dict
+    from tests.canned_responses import make_sample_paper
+
+    with open_dict(config):
+        config.journals.enabled = True
+        config.executor.send_empty = True
+        config.search.mode = 5
+
+    class StubRetriever:
+        def retrieve_papers(self):
+            return [make_sample_paper(title="arXiv bypass candidate")]
+
+    class FailingReranker:
+        def rerank(self, *args, **kwargs):
+            pytest.fail("non-PubMed candidate must be removed before ranking")
+
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor.fetch_zotero_corpus = lambda: [object()]
+    executor.filter_corpus = lambda corpus: corpus
+    executor._search_mode = 5
+    executor._keywords_raw = None
+    executor._structured_keywords = None
+    executor.retrievers = {"arxiv": StubRetriever()}
+    executor.reranker = FailingReranker()
+    executor.openai_client = object()
+
+    sent = []
+    monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda papers, summary=None: papers)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda cfg, body: sent.append(body))
+
+    result = executor.run()
+
+    assert result == 0
+    assert sent == [[]]
+
+
 # ---------------------------------------------------------------------------
 # fetch_zotero_corpus
 # ---------------------------------------------------------------------------
