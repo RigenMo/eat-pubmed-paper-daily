@@ -226,6 +226,29 @@ def test_source_text_cannot_create_additional_locator_labels(llm_params):
     assert labels == {"摘要段落1", "正文段落1"}
 
 
+def test_translation_excludes_generated_source_metadata():
+    from zotero_arxiv_daily.protocol import Paper
+
+    text = "【摘要段落1】\n原文译文，n=781。\n\n【补充材料】未提供；不能声称已核查补充材料。\n\n【材料范围】仅据摘要"
+    assert Paper._validate_reader_translation({"abstract_zh": text}) == "原文译文，n=781。"
+
+
+def test_persistently_long_card_stops_after_two_repairs_and_keeps_translation(llm_params):
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+
+    payload = json.loads(_READER_RESPONSE)
+    payload["reading_card"]["evidence"][0]["result"] = "关键结果" * 300
+    response = json.dumps(payload, ensure_ascii=False)
+    client, calls = make_reader_retry_client(first_response=response, second_response=response)
+    paper = make_sample_paper()
+    paper.generate_tldr(client, llm_params)
+    assert len(calls) == 3
+    assert paper.reader_status == "partial"
+    assert paper.abstract_zh == payload["abstract_zh"]
+    assert paper.reading_card is None
+
+
 def test_reader_rejects_fabricated_figure_beside_valid_paragraph():
     import json
     from tests.canned_responses import _READER_RESPONSE

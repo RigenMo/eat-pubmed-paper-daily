@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [reader, automatic]
+        mode: ${{ fromJSON(contains(github.event.head_commit.message, '[reader-only]') && '["reader"]' || '["reader", "automatic"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
