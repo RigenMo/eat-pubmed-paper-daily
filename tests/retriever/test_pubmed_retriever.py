@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import open_dict
 
 from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever, _parse_affiliation
 from tests.canned_responses import (
@@ -173,3 +174,77 @@ def test_pubmed_esearch_uses_valid_sort_value(config, monkeypatch):
     retriever._fetch_pmids("some query")
 
     assert captured_params["sort"] == "pub_date"
+
+
+def test_pubmed_esearch_appends_the_configured_journal_constraint(config, monkeypatch):
+    """The allowlist is part of every ESearch term, including date-only terms."""
+    captured_params = {}
+
+    with open_dict(config):
+        config.journals.enabled = True
+
+    def _fake_ncbi_get(url, params):
+        captured_params.update(params)
+        return SimpleNamespace(json=lambda: {"esearchresult": {"idlist": []}})
+
+    import zotero_arxiv_daily.retriever.pubmed_retriever as pubmed_retriever
+
+    monkeypatch.setattr(pubmed_retriever, "_ncbi_get", _fake_ncbi_get)
+    monkeypatch.setattr(pubmed_retriever, "sleep", lambda _: None)
+
+    retriever = PubMedRetriever(config)
+    retriever._fetch_pmids(retriever._date_filter())
+
+    term = captured_params["term"]
+    assert '"Nature Aging"[Journal]' in term
+    assert '"Eur Heart J"[Journal]' in term
+    assert term.count("[Journal]") == len(retriever._journal_query_names)
+    assert captured_params["retmax"] == retriever._max_results
+
+
+def test_pubmed_finalise_keeps_only_exact_allowlisted_journals(config, monkeypatch):
+    """Unknown, missing, and unrelated journals are excluded after MEDLINE fetch."""
+    with open_dict(config):
+        config.journals.enabled = True
+
+    records = [
+        {"PMID": "1", "JT": "Nature aging"},
+        {"PMID": "2", "JT": "Nat Aging"},
+        {"PMID": "3", "JT": "Nature Medicine"},
+        {"PMID": "4", "JT": "Unlisted Journal", "TA": "Eur Heart J"},
+        {"PMID": "5", "JT": "Unknown Journal"},
+        {"PMID": "6"},
+    ]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_details", lambda self, pmids: records)
+
+    kept = PubMedRetriever(config)._finalise([str(i) for i in range(1, 7)])
+
+    assert [record["PMID"] for record in kept] == ["1", "2", "4"]
+
+
+def test_pubmed_empty_enabled_shortlist_fails_closed(config, monkeypatch):
+    """An enabled empty shortlist must not fall back to unrestricted ESearch."""
+    with open_dict(config):
+        config.journals.enabled = True
+        config.journals.whitelist = []
+
+    def _unexpected_ncbi_get(*args, **kwargs):
+        pytest.fail("empty enabled shortlist must not issue an unrestricted query")
+
+    import zotero_arxiv_daily.retriever.pubmed_retriever as pubmed_retriever
+
+    monkeypatch.setattr(pubmed_retriever, "_ncbi_get", _unexpected_ncbi_get)
+    assert PubMedRetriever(config)._fetch_pmids("some query") == []
+
+
+def test_pubmed_debug_does_not_truncate_before_journal_filter_or_ranking(config, monkeypatch):
+    """PubMed retrieval keeps the complete candidate batch in debug mode."""
+    with open_dict(config):
+        config.executor.debug = True
+
+    pmids = [str(i) for i in range(10)]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_details", lambda self, received: [{"pmids": received}])
+
+    result = PubMedRetriever(config)._finalise(pmids)
+
+    assert result == [{"pmids": pmids}]

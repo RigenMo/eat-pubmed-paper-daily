@@ -21,6 +21,7 @@ llm:
   max_input_tokens: 1000000
 
 source:
+  mix_mode: 1
   arxiv:
     category: ["cs.AI","cs.CV","cs.LG","cs.CL"]
 

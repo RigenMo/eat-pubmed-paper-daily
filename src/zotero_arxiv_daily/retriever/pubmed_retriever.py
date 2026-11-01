@@ -1,5 +1,6 @@
 import re
 import requests
+import unicodedata
 from time import sleep
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +34,20 @@ def _parse_affiliation(ad_str: str) -> str:
         if len(result) == 2:             # keep department + institution (2 levels max)
             break
     return ", ".join(result) if result else (parts[0] if parts else ad_str[:120])
+
+
+def _normalize_journal_name(value: Any) -> str:
+    """Normalize a journal title for exact allowlist matching.
+
+    Matching is case-insensitive and tolerant of punctuation/whitespace
+    differences, but it is not substring matching: the resulting normalized
+    title must be one of the configured names or aliases.
+    """
+    if value is None:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
+    return " ".join(normalized.split())
 
 
 def _ncbi_get(url: str, params: dict[str, Any], retries: int = 5) -> requests.Response:
@@ -102,6 +117,52 @@ class PubMedRetriever(BaseRetriever):
         self._pubmed_broad_query: str | None = None  # broad query (single OR group)
         self._max_results: int = int(self.retriever_config.get("max_results", 200))
 
+        # Journal filtering is deliberately fail-closed. A configured but
+        # empty allowlist must never turn into an unrestricted PubMed query.
+        journal_config = self.config.get("journals", {})
+        self._journal_filter_enabled = bool(journal_config.get("enabled", False))
+        self._allowed_journals: set[str] = set()
+        self._journal_query_names: list[str] = []
+        if self._journal_filter_enabled:
+            min_jif = float(journal_config.get("min_jif", 0))
+            seen_query_names: set[str] = set()
+            for entry in journal_config.get("whitelist", []) or []:
+                try:
+                    jif = float(entry.get("jif", 0))
+                except (TypeError, ValueError):
+                    logger.warning(f"Ignoring journal with invalid JIF: {entry!r}")
+                    continue
+                if jif < min_jif:
+                    continue
+
+                name = str(entry.get("name", "")).strip()
+                aliases = entry.get("aliases", []) or []
+                if isinstance(aliases, str):
+                    aliases = [aliases]
+                names = [name, *[str(alias).strip() for alias in aliases]]
+                names = [candidate for candidate in names if candidate]
+                for candidate in names:
+                    normalized = _normalize_journal_name(candidate)
+                    if normalized:
+                        self._allowed_journals.add(normalized)
+                    if candidate and candidate.casefold() not in seen_query_names:
+                        seen_query_names.add(candidate.casefold())
+                        self._journal_query_names.append(candidate)
+
+            if self._journal_query_names:
+                self._journal_constraint = " OR ".join(
+                    f'"{name.replace(chr(34), "")}"[Journal]'
+                    for name in self._journal_query_names
+                )
+            else:
+                self._journal_constraint = None
+                logger.warning(
+                    "PubMed journal filter is enabled but its shortlist is empty; "
+                    "all PubMed queries will fail closed."
+                )
+        else:
+            self._journal_constraint = None
+
     def set_pubmed_query(self, pubmed_query: str) -> None:
         """Inject a structured PubMed strict query (1-2 AND concept groups)."""
         self._pubmed_query = pubmed_query or None
@@ -124,6 +185,10 @@ class PubMedRetriever(BaseRetriever):
         return f'("{start}"[PDAT] : "3000"[PDAT])'
 
     def _fetch_pmids(self, query: str) -> list[str]:
+        if self._journal_filter_enabled:
+            if not self._journal_constraint:
+                return []
+            query = f"({query}) AND ({self._journal_constraint})"
         params = {
             "db": "pubmed",
             "term": query,
@@ -155,6 +220,12 @@ class PubMedRetriever(BaseRetriever):
             records = _parse_medline(resp.text)
             all_records.extend(records)
         return all_records
+
+    def is_allowed_journal(self, journal: Any) -> bool:
+        """Return whether a final paper journal passes the exact allowlist gate."""
+        if not self._journal_filter_enabled:
+            return True
+        return _normalize_journal_name(journal) in self._allowed_journals
 
     # ------------------------------------------------------------------
     # BaseRetriever interface
@@ -236,10 +307,31 @@ class PubMedRetriever(BaseRetriever):
         return self._finalise(pmids)
 
     def _finalise(self, pmids: list[str]) -> list[dict[str, Any]]:
-        if self.config.executor.debug:
-            pmids = pmids[:5]
         logger.info(f"PubMed: fetching details for {len(pmids)} PMIDs...")
-        return self._fetch_details(pmids)
+        records = self._fetch_details(pmids)
+        if not self._journal_filter_enabled:
+            return records
+
+        kept: list[dict[str, Any]] = []
+        excluded = 0
+        for record in records:
+            candidates = []
+            for field in ("JT", "TA"):
+                value = record.get(field)
+                if isinstance(value, list):
+                    candidates.extend(value)
+                elif value:
+                    candidates.append(value)
+            if any(self.is_allowed_journal(value) for value in candidates):
+                kept.append(record)
+            else:
+                excluded += 1
+
+        logger.info(
+            f"PubMed journal filter: kept {len(kept)} record(s), "
+            f"excluded {excluded} unknown/unlisted record(s)."
+        )
+        return kept
 
     def convert_to_paper(self, raw_paper: dict[str, Any]) -> Paper | None:
         pmid = raw_paper.get("PMID", "")

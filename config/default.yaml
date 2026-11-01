@@ -1,4 +1,5 @@
 defaults:
   - base
   - characters
+  - journals
   - custom

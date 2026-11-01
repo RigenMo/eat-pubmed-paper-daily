@@ -44,6 +44,9 @@ def _base_config():
                 "executor.reranker=api",
                 "executor.debug=false",
                 "executor.send_empty=false",
+                # Generic canned PubMed fixtures use non-whitelisted journals;
+                # journal-specific tests explicitly enable the production gate.
+                "journals.enabled=false",
             ],
         )
     return cfg

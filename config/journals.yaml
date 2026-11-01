@@ -1,0 +1,73 @@
+journals:
+  # This is an allowlist, not a ranking preference. When enabled, PubMed
+  # candidates must match one of these journal names or approved aliases.
+  enabled: true
+  min_jif: 10.0
+  verified_date: "2026-11-01"
+  whitelist:
+    - name: Nature Aging
+      aliases: ["Nat Aging"]
+      year: 2025
+      jif: 25.0
+      source: https://www.nature.com/nataging/journal-impact
+      verified_date: "2026-11-01"
+    - name: Nature Food
+      aliases: ["Nat Food"]
+      year: 2025
+      jif: 24.7
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Genetics
+      aliases: ["Nat Genet"]
+      year: 2025
+      jif: 25.5
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Human Behaviour
+      aliases: ["Nature Human Behavior", "Nat Hum Behav"]
+      year: 2025
+      jif: 18.8
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Immunology
+      aliases: ["Nat Immunol"]
+      year: 2025
+      jif: 26.5
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Metabolism
+      aliases: ["Nat Metab"]
+      year: 2025
+      jif: 27.5
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Methods
+      aliases: ["Nat Methods"]
+      year: 2025
+      jif: 28.2
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Microbiology
+      aliases: ["Nat Microbiol"]
+      year: 2025
+      jif: 18.7
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Neuroscience
+      aliases: ["Nat Neurosci"]
+      year: 2025
+      jif: 20.3
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: Nature Protocols
+      aliases: ["Nat Protoc"]
+      year: 2025
+      jif: 18.4
+      source: https://www.nature.com/nature-portfolio/about-journals/journal-metrics
+      verified_date: "2026-11-01"
+    - name: European Heart Journal
+      aliases: ["Eur Heart J"]
+      year: 2025
+      jif: 43.5
+      source: https://academic.oup.com/eurheartj/pages/about
+      verified_date: "2026-11-01"

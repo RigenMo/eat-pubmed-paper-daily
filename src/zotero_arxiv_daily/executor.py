@@ -328,6 +328,28 @@ class Executor:
                 all_papers.extend(papers)
         logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
 
+        # A strict journal allowlist must not be bypassed by a concurrent
+        # arXiv/bioRxiv/medRxiv retriever. PubMed performs the record-level
+        # gate; this source-level gate handles mixed-source configurations and
+        # fails closed when PubMed is not active.
+        journals_config = self.config.get("journals", {})
+        if bool(journals_config.get("enabled", False)):
+            pubmed_retriever = self.retrievers.get("pubmed")
+            before_journal_gate = len(all_papers)
+            if pubmed_retriever is None:
+                all_papers = []
+            else:
+                all_papers = [
+                    paper
+                    for paper in all_papers
+                    if paper.source == "pubmed" and pubmed_retriever.is_allowed_journal(paper.journal)
+                ]
+            logger.info(
+                "Strict PubMed journal gate: kept "
+                f"{len(all_papers)} paper(s), excluded "
+                f"{before_journal_gate - len(all_papers)} non-allowlisted/non-PubMed paper(s)."
+            )
+
         reranked_papers = []
         if len(all_papers) > 0:
             # Step 4: rerank with mixed scoring
@@ -339,7 +361,10 @@ class Executor:
                 keyword_query=self._structured_keywords,
                 favorite_journals=fav_journals,
             )
-            reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
+            max_paper_num = int(self.config.executor.max_paper_num)
+            if self.config.executor.debug:
+                max_paper_num = min(max_paper_num, 5)
+            reranked_papers = reranked_papers[:max_paper_num]
 
             # Step 5: generate TLDRs, affiliations and Chinese title translations
             logger.info("Generating TLDR, affiliations and title translations...")
