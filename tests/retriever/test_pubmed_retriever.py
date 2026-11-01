@@ -1,15 +1,91 @@
 """Tests for PubMedRetriever."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from omegaconf import open_dict
 
-from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever, _parse_affiliation
+from zotero_arxiv_daily.retriever.pubmed_retriever import (
+    PubMedRetriever,
+    _parse_affiliation,
+    _parse_pubmed_xml,
+)
 from tests.canned_responses import (
     SAMPLE_PUBMED_ESEARCH_RESPONSE,
     SAMPLE_PUBMED_MEDLINE_TEXT,
 )
+
+
+SAMPLE_PUBMED_XML = """\
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>30000003</PMID>
+      <Article>
+        <ArticleTitle>A publication-date fixture</ArticleTitle>
+        <Journal>
+          <JournalIssue>
+            <PubDate><Year>2027</Year><Month>Jan</Month><Day>15</Day></PubDate>
+          </JournalIssue>
+          <Title>Journal Full Name</Title>
+          <ISOAbbreviation>J Full Name</ISOAbbreviation>
+        </Journal>
+        <Abstract>
+          <AbstractText Label="BACKGROUND">Background section.</AbstractText>
+          <AbstractText Label="RESULTS">Results section.</AbstractText>
+        </Abstract>
+        <AuthorList>
+          <Author>
+            <LastName>Smith</LastName><Initials>J</Initials>
+            <AffiliationInfo><Affiliation>Department A, University A</Affiliation></AffiliationInfo>
+          </Author>
+          <Author><CollectiveName>Example Consortium</CollectiveName></Author>
+        </AuthorList>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1234/example.1</ELocationID>
+        <ArticleDate DateType="Electronic">
+          <Year>2026</Year><Month>Oct</Month><Day>31</Day>
+        </ArticleDate>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <History>
+        <PubMedPubDate PubStatus="received"><Year>2025</Year><Month>Nov</Month><Day>2</Day></PubMedPubDate>
+        <PubMedPubDate PubStatus="revised"><Year>2026</Year><Month>Jan</Month><Day>5</Day></PubMedPubDate>
+        <PubMedPubDate PubStatus="accepted"><Year>2026</Year><Month>Feb</Month><Day>8</Day></PubMedPubDate>
+        <PubMedPubDate PubStatus="epublish"><Year>2026</Year><Month>Oct</Month><Day>31</Day></PubMedPubDate>
+        <PubMedPubDate PubStatus="ppublish"><Year>2027</Year><Month>Jan</Month><Day>15</Day></PubMedPubDate>
+        <PubMedPubDate PubStatus="entrez"><Year>2026</Year><Month>Nov</Month><Day>1</Day></PubMedPubDate>
+      </History>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">30000003</ArticleId>
+        <ArticleId IdType="doi">10.1234/example.1</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+SAMPLE_PUBMED_XML_WITH_PARTIAL_DATE = """\
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>30000004</PMID>
+      <Article>
+        <ArticleTitle>A seasonal publication-date fixture</ArticleTitle>
+        <Journal>
+          <JournalIssue><PubDate><Year>2024</Year><Season>Winter</Season></PubDate></JournalIssue>
+          <Title>Seasonal Journal</Title>
+          <ISOAbbreviation>Seasonal J</ISOAbbreviation>
+        </Journal>
+        <Abstract><AbstractText>Unstructured abstract.</AbstractText></Abstract>
+      </Article>
+    </MedlineCitation>
+    <PubmedData><History /></PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
 
 
 def _patch_ncbi(monkeypatch, esearch_result=None, medline_text=None):
@@ -41,6 +117,53 @@ def test_pubmed_retrieve_end_to_end(config, monkeypatch):
     titles = {p.title for p in papers}
     assert "A sample PubMed paper on AI diagnostics" in titles
     assert all(p.source == "pubmed" for p in papers)
+
+
+def test_parse_pubmed_xml_preserves_citation_and_publication_history():
+    records = _parse_pubmed_xml(SAMPLE_PUBMED_XML)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["PMID"] == "30000003"
+    assert record["TI"] == "A publication-date fixture"
+    assert record["AB"] == ["BACKGROUND: Background section.", "RESULTS: Results section."]
+    assert record["AU"] == ["Smith J", "Example Consortium"]
+    assert record["AD"] == ["Department A, University A"]
+    assert record["JT"] == "Journal Full Name"
+    assert record["TA"] == "J Full Name"
+    assert record["LID"] == "10.1234/example.1 [doi]"
+
+    # ArticleDate electronic is the online-first publication date even though
+    # the journal issue date is later; no date is padded to January 1.
+    assert record["publication_date"] == "2026-10-31"
+    assert [entry["event"] for entry in record["publication_history"]] == [
+        "received",
+        "revised",
+        "accepted",
+        "epublish",
+        "publication",
+        "entrez",
+        "ppublish",
+    ]
+    assert record["publication_history"][0] == {
+        "event": "received",
+        "date": "2025-11-02",
+        "source": "https://pubmed.ncbi.nlm.nih.gov/30000003/",
+    }
+    assert record["publication_history"][-1]["event"] == "ppublish"
+
+
+def test_parse_pubmed_xml_preserves_partial_season_date_without_fabricating_day():
+    record = _parse_pubmed_xml(SAMPLE_PUBMED_XML_WITH_PARTIAL_DATE)[0]
+
+    assert record["publication_date"] == "2024 Winter"
+    assert record["publication_history"] == [
+        {
+            "event": "publication",
+            "date": "2024 Winter",
+            "source": "https://pubmed.ncbi.nlm.nih.gov/30000004/",
+        }
+    ]
 
 
 def test_pubmed_convert_to_paper_full_record(config):
@@ -151,6 +274,70 @@ def test_pubmed_no_query_mode5_uses_date_only_query(config, monkeypatch):
     assert result == [{"pmids": ["1", "2"]}]
 
 
+def test_pubmed_date_filter_uses_utc_today_edat_upper_bound(config):
+    retriever = PubMedRetriever(config)
+    query = retriever._date_filter()
+    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+
+    assert "[EDAT]" in query
+    assert "[PDAT]" not in query
+    assert '"3000"' not in query
+    assert f'"{today}"[EDAT]' in query
+
+
+def test_pubmed_dynamic_easyscholar_mode_disables_static_journal_gate(config):
+    with open_dict(config):
+        config.journals.enabled = True
+        config.journals.mode = "easyscholar"
+        config.journals.easyscholar.enabled = True
+        config.journals.easyscholar.api_key = "test-key"
+
+    retriever = PubMedRetriever(config)
+
+    assert retriever._dynamic_jif is True
+    assert retriever._journal_filter_enabled is False
+    assert retriever.is_allowed_journal("Unlisted Journal") is True
+
+
+def test_pubmed_theme_queries_are_balanced_and_deduplicated(config, monkeypatch):
+    captured = []
+
+    def _fake_fetch_pmids(self, query):
+        captured.append((query, self._max_results))
+        if "theme one" in query:
+            return ["1", "2", "3"]
+        return ["2", "4"]
+
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids", _fake_fetch_pmids)
+    monkeypatch.setattr(
+        PubMedRetriever,
+        "_fetch_details",
+        lambda self, pmids: [{"PMID": pmid} for pmid in pmids],
+    )
+
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(4)
+    retriever.set_pubmed_queries(["theme one", "theme two"])
+    result = retriever._retrieve_raw_papers()
+
+    assert [record["PMID"] for record in result] == ["1", "2", "4", "3"]
+    assert [limit for _, limit in captured] == [2, 2]
+    assert all("theme one" not in query or "[EDAT]" in query for query, _ in captured)
+
+
+def test_pubmed_empty_configured_theme_queries_do_not_fall_back_to_date_only(config, monkeypatch):
+    monkeypatch.setattr(
+        PubMedRetriever,
+        "_fetch_pmids",
+        lambda self, query: pytest.fail("empty configured theme queries must not use date-only retrieval"),
+    )
+
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries([])
+
+    assert retriever._retrieve_raw_papers() == []
+
+
 def test_pubmed_no_query_keyword_mode_raises(config):
     """Keyword modes must not fall back to an unfiltered PubMed search."""
     from omegaconf import open_dict
@@ -192,12 +379,47 @@ def test_pubmed_esearch_uses_valid_sort_value(config, monkeypatch):
     assert captured_params["sort"] == "pub_date"
 
 
+def test_pubmed_fetch_details_requests_xml_and_parses_dates(config, monkeypatch):
+    captured_params = {}
+
+    def _fake_ncbi_get(url, params):
+        captured_params.update(params)
+        return SimpleNamespace(text=SAMPLE_PUBMED_XML)
+
+    import zotero_arxiv_daily.retriever.pubmed_retriever as pubmed_retriever
+
+    monkeypatch.setattr(pubmed_retriever, "_ncbi_get", _fake_ncbi_get)
+    monkeypatch.setattr(pubmed_retriever, "sleep", lambda _: None)
+
+    records = PubMedRetriever(config)._fetch_details(["30000003"])
+
+    assert captured_params["rettype"] == "abstract"
+    assert captured_params["retmode"] == "xml"
+    assert records[0]["publication_date"] == "2026-10-31"
+
+
+@pytest.mark.parametrize("response_text", ["<PubmedArticleSet />", "<PubmedArticleSet>"])
+def test_pubmed_fetch_details_rejects_empty_or_invalid_xml(config, monkeypatch, response_text):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as pubmed_retriever
+
+    monkeypatch.setattr(
+        pubmed_retriever,
+        "_ncbi_get",
+        lambda url, params: SimpleNamespace(text=response_text),
+    )
+    monkeypatch.setattr(pubmed_retriever, "sleep", lambda _: None)
+
+    with pytest.raises(ValueError):
+        PubMedRetriever(config)._fetch_details(["30000003"])
+
+
 def test_pubmed_esearch_appends_the_configured_journal_constraint(config, monkeypatch):
     """The allowlist is part of every ESearch term, including date-only terms."""
     captured_params = {}
 
     with open_dict(config):
         config.journals.enabled = True
+        config.journals.mode = "whitelist"
 
     def _fake_ncbi_get(url, params):
         captured_params.update(params)
@@ -222,6 +444,7 @@ def test_pubmed_finalise_keeps_only_exact_allowlisted_journals(config, monkeypat
     """Unknown, missing, and unrelated journals are excluded after MEDLINE fetch."""
     with open_dict(config):
         config.journals.enabled = True
+        config.journals.mode = "whitelist"
 
     records = [
         {"PMID": "1", "JT": "Nature aging"},
@@ -242,6 +465,7 @@ def test_pubmed_empty_enabled_shortlist_fails_closed(config, monkeypatch):
     """An enabled empty shortlist must not fall back to unrestricted ESearch."""
     with open_dict(config):
         config.journals.enabled = True
+        config.journals.mode = "whitelist"
         config.journals.whitelist = []
 
     def _unexpected_ncbi_get(*args, **kwargs):

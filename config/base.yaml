@@ -8,6 +8,15 @@ search:
   mode: 5 # Scoring weight dial. 1=keyword only, 2=more keyword/less Zotero, 3=equal, 4=less keyword/more Zotero, 5=Zotero only. Example: 3
   keywords: null # Natural language description of your research interests, used when mode < 5. Example: "hydrogel materials in ophthalmology combined with traditional Chinese medicine"
 
+recommendations:
+  enabled: true # Verify each candidate against actual Zotero evidence before recommendation.
+  candidate_limit: 60 # Semantic shortlist for journal-metric queries.
+  verify_limit: 20 # Relevant, IF-eligible candidates to examine in detail.
+  batch_size: 5
+  max_papers: 10 # Deliver fewer when fewer papers qualify.
+  max_per_journal: 2
+  require_cards: true # Do not send an email full of failed reading cards.
+
 source:
   mix_mode: 5 # Source mix dial. 1=PubMed only, 2=more PubMed/less arXiv, 3=equal, 4=less PubMed/more arXiv, 5=arXiv only. Example: 3
   arxiv:

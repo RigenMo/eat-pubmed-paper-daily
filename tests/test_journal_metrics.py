@@ -326,9 +326,30 @@ def test_api_response_reaches_the_email_badges_with_correct_provenance(monkeypat
 
     html = render_email(journal_metrics.enrich_journal_metrics([paper], _journal_config()))
 
-    assert "25.0（年份未提供）" in html
-    assert "学科未提供 / Q1（年份未提供）" in html
+    assert "JIF(影响因子)：25.0" in html
+    assert "JCR分区：Q1" in html
+    assert "年份未提供" not in html
+    assert "学科未提供" not in html
     assert "中科院分区大类（升级版）" in html
     assert "细胞生物学1区/老年医学1区/神经科学1区。" in html
     assert "25.0（2025）" not in html
     assert 'href="https://www.easyscholar.cc/console/query"' in html
+
+
+def test_live_mode_does_not_silently_fall_back_to_the_old_journal_list(monkeypatch):
+    config = _journal_config()
+    config["mode"] = "easyscholar"
+    paper = _paper("Nature Aging", {"jif": 25.0, "year": 2025})
+    monkeypatch.setattr(journal_metrics.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError()))
+
+    with pytest.raises(RuntimeError, match="live journal filtering is incomplete"):
+        journal_metrics.enrich_journal_metrics([paper], config)
+
+
+def test_live_mode_requires_a_valid_current_jif_not_an_audited_old_value(monkeypatch):
+    config = _journal_config()
+    config["mode"] = "easyscholar"
+    paper = _paper("Nature Aging", {"jif": 25.0, "year": 2025})
+    monkeypatch.setattr(journal_metrics.requests, "get", lambda *args, **kwargs: _response(_payload({"sci": "Q1"})))
+
+    assert journal_metrics.enrich_journal_metrics([paper], config) == []

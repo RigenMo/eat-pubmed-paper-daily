@@ -74,6 +74,7 @@ class EasyScholarClient:
         self._last_request_at: float | None = None
         self._cache: dict[str, dict[str, Any] | None] = {}
         self._disabled = False
+        self.unavailable = False
 
     def _pace(self) -> None:
         now = monotonic()
@@ -91,11 +92,13 @@ class EasyScholarClient:
 
     def _parse(self, payload: Any) -> dict[str, Any] | None:
         if not isinstance(payload, Mapping):
+            self.unavailable = True
             logger.warning("EasyScholar response was not an object")
             return None
 
         code = payload.get("code")
         if code != 200 and code != "200":
+            self.unavailable = True
             safe_code = _safe_numeric(code)
             if safe_code is None:
                 logger.warning("EasyScholar response code was unsuccessful")
@@ -111,7 +114,7 @@ class EasyScholarClient:
         official_rank = data.get("officialRank") if isinstance(data, Mapping) else None
         rank = official_rank.get("all") if isinstance(official_rank, Mapping) else None
         if not isinstance(rank, Mapping):
-            logger.warning("EasyScholar response did not contain official rankings")
+            logger.info("EasyScholar did not return journal rankings")
             return None
 
         metrics: dict[str, Any] = {
@@ -173,12 +176,14 @@ class EasyScholarClient:
                 allow_redirects=False,
             )
         except Exception:
+            self.unavailable = True
             self._warn_request_failure()
             self._cache[cache_key] = None
             return None
 
         status_code = getattr(response, "status_code", None)
         if status_code != 200:
+            self.unavailable = True
             safe_status = _safe_numeric(status_code)
             if safe_status is None:
                 logger.warning("EasyScholar HTTP request failed")
@@ -191,6 +196,7 @@ class EasyScholarClient:
         try:
             payload = response.json()
         except Exception:
+            self.unavailable = True
             self._warn_request_failure()
             self._cache[cache_key] = None
             return None
@@ -207,11 +213,16 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
     heavier paper protocol or any retrieval dependencies.
     """
     easyscholar = _config_value(journal_config, "easyscholar", {})
+    dynamic = bool(_config_value(journal_config, "enabled", False)) and _config_value(journal_config, "mode") == "easyscholar"
     if not _config_value(easyscholar, "enabled", False):
+        if dynamic:
+            raise ValueError("EasyScholar must be enabled for live journal filtering")
         return papers
 
     api_key = _config_value(easyscholar, "api_key", "")
     if not str(api_key or "").strip():
+        if dynamic:
+            raise ValueError("Set EASYSCHOLAR_API_KEY for live journal filtering")
         return papers
 
     client = EasyScholarClient(
@@ -232,6 +243,8 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
         static_metrics = dict(original_metrics) if isinstance(original_metrics, Mapping) else {}
 
         live_metrics = client.lookup(journal) if journal else None
+        if dynamic and client.unavailable:
+            raise RuntimeError("EasyScholar lookup failed; live journal filtering is incomplete and no email was sent.")
         final_metrics = static_metrics
         if live_metrics is not None:
             final_metrics.update(live_metrics)
@@ -239,7 +252,10 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
             enriched_count += 1
 
         if _config_value(journal_config, "enabled", False):
-            jif = _finite_jif(final_metrics.get("jif"))
+            # Live mode cannot silently turn into the old shortlist when an
+            # unknown journal lacks IF data. Metadata fallback is display-only.
+            filter_metrics = live_metrics if dynamic else final_metrics
+            jif = _finite_jif((filter_metrics or {}).get("jif"))
             if jif is None or jif < min_jif:
                 continue
         retained.append(paper)

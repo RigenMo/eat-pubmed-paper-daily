@@ -1,11 +1,12 @@
 journals:
-  # This is an allowlist, not a ranking preference. When enabled, PubMed
-  # candidates must match one of these journal names or approved aliases.
+  # Live JIF filtering follows automatic Zotero retrieval across all journals.
+  # The audited list below supplies fallback metadata, not a search restriction.
   enabled: true
+  mode: easyscholar
   min_jif: 10.0
   verified_date: "2026-11-01"
   # Fill EASYSCHOLAR_API_KEY in GitHub Actions Secrets. No key is stored here.
-  # EasyScholar supplements the existing shortlist; it does not expand it.
+  # The live mode requires a key and never falls back to the fixed journal list.
   easyscholar:
     enabled: true
     api_key: ${oc.env:EASYSCHOLAR_API_KEY,}

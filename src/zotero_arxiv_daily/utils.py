@@ -8,12 +8,6 @@ from email.utils import parseaddr, formataddr
 from loguru import logger
 import datetime
 from omegaconf import DictConfig
-import pymupdf
-import pymupdf.layout
-pymupdf.TOOLS.mupdf_display_errors(False)
-pymupdf.layout.activate()
-
-import pymupdf4llm  # noqa: E402
 
 def extract_tex_code_from_tar(file_path:str, paper_id:str) -> dict[str,str]:
     try:
@@ -86,6 +80,13 @@ def extract_tex_code_from_tar(file_path:str, paper_id:str) -> dict[str,str]:
     return file_contents
 
 def extract_markdown_from_pdf(file_path:str) -> str:
+    # PubMed-only retrieval does not need to load the PDF/layout runtime.
+    import pymupdf
+    import pymupdf.layout
+    import pymupdf4llm
+
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    pymupdf.layout.activate()
     return pymupdf4llm.to_markdown(file_path,use_ocr=False,header=False,footer=False,ignore_code=True)
 
 def glob_match(path:str, pattern:str) -> bool:
