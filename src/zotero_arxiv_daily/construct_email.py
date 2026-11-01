@@ -1,203 +1,613 @@
-from .protocol import Paper
+from collections.abc import Mapping
+from html import escape
 import math
+import re
+from typing import Any
+from urllib.parse import urlparse
+
+from .protocol import Paper
 
 
-framework = """
-<!DOCTYPE HTML>
-<html>
+framework = """<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
-  <style>
-    .star-wrapper {
-      font-size: 1.3em; /* 调整星星大小 */
-      line-height: 1; /* 确保垂直对齐 */
-      display: inline-flex;
-      align-items: center; /* 保持对齐 */
-    }
-    .half-star {
-      display: inline-block;
-      width: 0.5em; /* 半颗星的宽度 */
-      overflow: hidden;
-      white-space: nowrap;
-      vertical-align: middle;
-    }
-    .full-star {
-      vertical-align: middle;
-    }
-  </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
-<body>
-
-<div>
+<body style="margin:0; padding:16px; background:#ffffff; color:#333333; font-family:Arial, 'Microsoft YaHei', sans-serif;">
+  <div style="width:100%; max-width:900px; margin:0 auto;">
     __CONTENT__
-</div>
-
-<br><br>
-<div>
-To unsubscribe, remove your email in your Github Action setting.
-</div>
-
+    <div style="padding:20px 4px 4px; color:#777777; font-size:12px; line-height:1.6;">
+      To unsubscribe, remove your email in your Github Action setting.
+    </div>
+  </div>
 </body>
 </html>
 """
 
-def get_empty_html():
-  block_template = """
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background-color: #f9f9f9;">
-  <tr>
-    <td style="font-size: 20px; font-weight: bold; color: #333;">
-        No Papers Today. Take a Rest!
-    </td>
-  </tr>
-  </table>
-  """
-  return block_template
 
 _SOURCE_BADGE_STYLES = {
-    "pubmed":   "background-color:#0066cc; color:#fff;",
-    "arxiv":    "background-color:#b31b1b; color:#fff;",
-    "biorxiv":  "background-color:#9b4dca; color:#fff;",
-    "medrxiv":  "background-color:#2a9d8f; color:#fff;",
+    "pubmed": "background-color:#0066cc; color:#fff;",
+    "arxiv": "background-color:#b31b1b; color:#fff;",
+    "biorxiv": "background-color:#9b4dca; color:#fff;",
+    "medrxiv": "background-color:#2a9d8f; color:#fff;",
 }
 _SOURCE_LABELS = {
-    "pubmed":  "PubMed",
-    "arxiv":   "arXiv",
+    "pubmed": "PubMed",
+    "arxiv": "arXiv",
     "biorxiv": "bioRxiv",
     "medrxiv": "medRxiv",
 }
 
 
-def _build_source_badge(source: str | None, journal: str | None) -> str:
-    """Return an HTML snippet with a colored source badge and optional journal name."""
-    if not source:
+def _text_value(value: Any) -> str:
+    """Return scalar text only; never expose Python container repr in email."""
+    if value is None or isinstance(value, (Mapping, list, tuple, set)):
         return ""
-    style = _SOURCE_BADGE_STYLES.get(source.lower(), "background-color:#555; color:#fff;")
-    label = _SOURCE_LABELS.get(source.lower(), source.upper())
+    return str(value)
+
+
+def _render_rich_text(value: Any) -> str:
+    """Escape text and render only the small Markdown subset used by the report."""
+    text = _text_value(value)
+    if not text:
+        return ""
+
+    rendered_lines = []
+    for line in text.splitlines():
+        heading = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+        line_text = heading.group(1) if heading else line
+        rendered = escape(line_text, quote=False)
+        rendered = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", rendered)
+        if heading:
+            rendered = f"<strong>{rendered}</strong>"
+        rendered_lines.append(rendered)
+    return "<br>".join(rendered_lines)
+
+
+def _render_paragraphs(value: Any, paragraph_style: str = "") -> str:
+    """Render scalar text as separate paragraphs, omitting empty lines."""
+    text = _text_value(value)
+    if not text:
+        return ""
+    style = (
+        "margin:6px 0; font-size:14px; line-height:1.75; color:#333333;"
+        + paragraph_style
+    )
+    paragraphs = []
+    for line in text.splitlines():
+        if line.strip():
+            paragraphs.append(f'<p style="{style}">{_render_rich_text(line)}</p>')
+    return "".join(paragraphs)
+
+
+def _safe_url(value: Any) -> str:
+    """Return an escaped HTTP(S) URL, or an empty string for unsafe input."""
+    if value is None:
+        return ""
+    raw = str(value).strip()
+    if not raw or any(char in raw for char in "\r\n"):
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return escape(raw, quote=True)
+
+
+def _metric_value(metrics: Any, *keys: str) -> Any:
+    if isinstance(metrics, Mapping):
+        for key in keys:
+            if key in metrics:
+                return metrics[key]
+        return None
+    if metrics is None:
+        return None
+    for key in keys:
+        value = getattr(metrics, key, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _metric_text(value: Any, unknown: str = "未核实") -> str:
+    text = _text_value(value).strip()
+    return escape(text, quote=False) if text else unknown
+
+
+def _metric_badge(
+    label: str,
+    value: str,
+    source: Any = None,
+) -> str:
+    source_url = _safe_url(source)
+    source_link = (
+        f' <a href="{source_url}" style="margin-left:6px; color:#664d03; font-size:11px;">来源</a>'
+        if source_url
+        else '<span style="margin-left:6px; color:#8a6d3b; font-size:11px;">来源未核实</span>'
+    )
+    return (
+        '<span style="display:inline-block; margin:2px 5px 2px 0; padding:5px 8px; '
+        'border-radius:4px; background-color:#fff3cd; color:#664d03; font-size:12px; '
+        'line-height:1.45; max-width:100%; box-sizing:border-box; overflow-wrap:anywhere;">'
+        f"<strong>{escape(label, quote=False)}：{value}</strong>{source_link}</span>"
+    )
+
+
+def _with_year(value: Any, year: Any, unknown_year: str = "年份未核实") -> str:
+    value_text = _metric_text(value)
+    if value_text == "未核实":
+        return f"未核实（{unknown_year}）"
+    year_text = _text_value(year).strip()
+    year_text = year_text or unknown_year
+    return f"{value_text}（{escape(year_text, quote=False)}）"
+
+
+def _level_value(value: Any, level: str) -> Any:
+    """Read a value from a canonical CAS ``{big, small}`` mapping."""
+    if not isinstance(value, Mapping):
+        return None
+    keys = (level, "大类") if level == "big" else (level, "小类")
+    for key in keys:
+        if key in value:
+            selected = value[key]
+            if isinstance(selected, Mapping):
+                return selected.get("value")
+            return selected
+    return None
+
+
+def _build_journal_metrics_html(metrics: Any) -> str:
+    """Render verified/unverified metric badges inside valid table cells."""
+    cas_category = _metric_value(metrics, "cas_category")
+    cas_quartile = _metric_value(metrics, "cas_quartile")
+    cas_year = _metric_value(metrics, "cas_year")
+    cas_source = _metric_value(metrics, "cas_source")
+    cas_version = _text_value(_metric_value(metrics, "cas_version")).strip()
+
+    jif = _metric_value(metrics, "jif")
+    jif_year = _metric_value(metrics, "jif_year", "year")
+    # ``source`` belongs to the overall impact-factor record. JCR and CAS use
+    # their own explicit source fields and never inherit it.
+    jif_source = _metric_value(metrics, "source")
+    jcr_category = _metric_value(metrics, "jcr_category")
+    jcr_quartile = _metric_value(metrics, "jcr_quartile")
+    jcr_year = _metric_value(metrics, "jcr_year")
+    jcr_source = _metric_value(metrics, "jcr_source")
+
+    # The API provides the latest values without metric years. A lookup date
+    # is not a JCR/CAS data year, and must never be substituted for one.
+    provider = _metric_value(metrics, "metrics_provider")
+    query_source = "https://www.easyscholar.cc/console/query"
+    jif_unknown_year = "年份未提供" if provider == "EasyScholar" and jif_source == query_source else "年份未核实"
+    jcr_unknown_year = "年份未提供" if provider == "EasyScholar" and jcr_source == query_source else "年份未核实"
+    cas_unknown_year = "年份未提供" if provider == "EasyScholar" and cas_source == query_source else "年份未核实"
+
+    category_unknown = "学科未提供" if jcr_unknown_year == "年份未提供" else "类别未核实"
+    category_text = _metric_text(jcr_category, category_unknown)
+    quartile_text = _metric_text(jcr_quartile, "分区未核实")
+    if jcr_category is None and jcr_quartile is None and jcr_year is None:
+        jcr_value = "未核实（年份未核实）"
+    else:
+        jcr_value = f"{category_text} / {quartile_text}"
+        jcr_year_text = _text_value(jcr_year).strip() or jcr_unknown_year
+        jcr_value += f"（{escape(jcr_year_text, quote=False)}）"
+
+    cas_badges = []
+    has_cas_mapping = isinstance(cas_category, Mapping) or isinstance(cas_quartile, Mapping)
+    has_cas_scalar = not has_cas_mapping and (
+        cas_category is not None or cas_quartile is not None
+    )
+    if has_cas_scalar:
+        scalar_value = (
+            f"{_metric_text(cas_category, '类别未注明')} / "
+            f"{_metric_text(cas_quartile, '分区未注明')}"
+        )
+        scalar_year = _text_value(cas_year).strip() or cas_unknown_year
+        scalar_value += f"（{escape(scalar_year, quote=False)}）"
+        cas_badges.append(_metric_badge("中科院分区", scalar_value, cas_source))
+    for level, label in (
+        ("big", "中科院分区大类"),
+        ("small", "中科院分区小类"),
+    ):
+        if cas_version:
+            label += f"（{cas_version}）"
+        if has_cas_scalar:
+            continue
+        category = _level_value(cas_category, level)
+        quartile = _level_value(cas_quartile, level)
+        if category is None and quartile is None and cas_year is None:
+            cas_value = "未核实（年份未核实）"
+        else:
+            # EasyScholar's CAS labels already include the subject name and
+            # partition. Preserve all small-subject labels without aggregation.
+            if category is None and quartile is not None:
+                cas_value = _metric_text(quartile)
+            else:
+                cas_value = f"{_metric_text(category, '类别未核实')} / {_metric_text(quartile, '分区未核实')}"
+            cas_year_text = _text_value(cas_year).strip() or cas_unknown_year
+            cas_value += f"（{escape(cas_year_text, quote=False)}）"
+        cas_badges.append(
+            _metric_badge(label, cas_value, cas_source)
+        )
+
+    jif_value = _with_year(jif, jif_year, jif_unknown_year)
+    badges = [
+        _metric_badge("JIF(影响因子)", jif_value, jif_source),
+        _metric_badge("JCR分区", jcr_value, jcr_source),
+        *cas_badges,
+    ]
+    query_notice = ""
+    if provider == "EasyScholar":
+        queried_at = _metric_text(_metric_value(metrics, "queried_at"), "查询日期未提供")
+        query_notice = f'<div style="margin-top:4px; color:#666666;">EasyScholar 查询日期：{queried_at}（UTC，非指标年份）</div>'
+    return (
+        '<tr><td style="padding:5px 16px 8px; font-size:12px; line-height:1.5;">'
+        '<div style="margin-bottom:3px; color:#555555;"><strong>期刊指标</strong></div>'
+        + "".join(badges)
+        + query_notice
+        + "</td></tr>"
+    )
+
+
+def get_empty_html() -> str:
+    return (
+        '<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" '
+        'style="font-family:Arial, \'Microsoft YaHei\', sans-serif; border:1px solid #ddd; '
+        'border-radius:8px; background-color:#f9f9f9;">'
+        '<tr><td style="padding:16px; font-size:20px; font-weight:bold; color:#333333;">'
+        "No Papers Today. Take a Rest!"
+        "</td></tr></table>"
+    )
+
+
+def _build_source_badge(source: str | None, journal: str | None) -> str:
+    """Return an escaped source badge and optional journal name."""
+    source_text = _text_value(source).strip()
+    if not source_text:
+        return ""
+    source_key = source_text.lower()
+    style = _SOURCE_BADGE_STYLES.get(source_key, "background-color:#555; color:#fff;")
+    label = _SOURCE_LABELS.get(source_key, source_text.upper())
     badge = (
         f'<span style="{style} border-radius:3px; padding:2px 7px; '
-        f'font-size:12px; font-weight:bold;">{label}</span>'
+        f'font-size:12px; font-weight:bold;">{escape(label, quote=False)}</span>'
     )
-    if journal:
-        badge += f'&nbsp;<span style="color:#555; font-style:italic; font-size:12px;">{journal}</span>'
+    journal_text = _text_value(journal).strip()
+    if journal_text:
+        badge += (
+            f'&nbsp;<span style="color:#555; font-style:italic; font-size:12px;">'
+            f"{escape(journal_text, quote=False)}</span>"
+        )
     return badge
 
 
-def get_block_html(title:str, authors:str, rate:str, tldr:str, pdf_url:str,
-                   affiliations:str=None, source:str=None, journal:str=None, stars:str="",
-                   title_zh:str=None):
-    source_badge = _build_source_badge(source, journal)
-    source_row = (
-        f'<tr><td style="padding: 4px 0 6px 0;">{source_badge}</td></tr>'
-        if source_badge else ""
-    )
-    title_zh_row = (
-        f'<tr><td style="font-size: 15px; color: #555; padding-top: 2px;">{title_zh}</td></tr>'
-        if title_zh else ""
-    )
-    block_template = """
-    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 1px solid #ddd; border-radius: 8px; padding: 16px; background-color: #f9f9f9;">
-    <tr>
-        <td style="font-size: 20px; font-weight: bold; color: #333;">
-            {title}
-        </td>
-    </tr>
-    {title_zh_row}
-    {source_row}
-    <tr>
-        <td style="font-size: 14px; color: #666; padding: 4px 0;">
-            {authors}
-            <br>
-            <i>{affiliations}</i>
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>Relevance:</strong> {rate} {stars}
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; padding: 8px 0;">
-            <strong>TLDR:</strong> {tldr}
-        </td>
-    </tr>
-    <tr>
-        <td style="padding: 8px 0;">
-            <a href="{pdf_url}" style="display: inline-block; text-decoration: none; font-size: 14px; font-weight: bold; color: #fff; background-color: #d9534f; padding: 8px 16px; border-radius: 4px;">PDF</a>
-        </td>
-    </tr>
-</table>
-"""
-    return block_template.format(
-        title=title, authors=authors, rate=rate, tldr=tldr,
-        pdf_url=pdf_url, affiliations=affiliations,
-        source_row=source_row, stars=stars, title_zh_row=title_zh_row,
+def _section_row(heading: str, content: str) -> str:
+    return (
+        '<tr><td style="padding:7px 16px 2px; font-size:14px; line-height:1.7; overflow-wrap:anywhere;">'
+        '<div style="margin:0 0 3px; color:#2c5f8a; font-size:15px;">'
+        f"<strong>{escape(heading, quote=False)}</strong></div>"
+        f"{content}"
+        "</td></tr>"
     )
 
-def get_stars(score:float):
+
+def _string_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if _text_value(item).strip()]
+
+
+def _build_design_html(design: Any) -> str:
+    if isinstance(design, Mapping):
+        fields = (
+            ("对象与数据", "objects_data"),
+            ("任务与定义", "task_definitions"),
+            ("实现与比较", "implementation"),
+            ("验证与范围", "comparison_validation_scope"),
+        )
+        paragraphs = []
+        for label, key in fields:
+            value = design.get(key)
+            if value is None:
+                continue
+            rendered = _render_rich_text(value)
+            if rendered:
+                paragraphs.append(
+                    '<p style="margin:6px 0; font-size:14px; line-height:1.75; color:#333333;">'
+                    f"<strong>{label}：</strong> {rendered}</p>"
+                )
+        return "".join(paragraphs)
+    return ""
+
+
+def _build_evidence_html(evidence: Any) -> str:
+    evidence = evidence if isinstance(evidence, list) else []
+    paragraphs = []
+    for item in evidence:
+        if isinstance(item, Mapping):
+            claim = _render_rich_text(item.get("claim"))
+            comparison = _render_rich_text(item.get("comparison"))
+            result = _render_rich_text(item.get("result"))
+            locator = _render_rich_text(item.get("locator"))
+            if not any((claim, comparison, result, locator)):
+                continue
+            rendered = f"{claim} → {comparison} → {result}（定位：{locator}）"
+        else:
+            continue
+        if rendered:
+            paragraphs.append(
+                '<p style="margin:6px 0; font-size:14px; line-height:1.75; color:#333333;">'
+                f"{rendered}</p>"
+            )
+    if not paragraphs:
+        paragraphs.append(
+            '<p style="margin:6px 0; font-size:14px; line-height:1.75; color:#666666;">'
+            "【未报告/材料未提供】</p>"
+        )
+    return "".join(paragraphs)
+
+
+def _build_reading_report_html(
+    abstract_zh: Any,
+    reading_card: Any,
+    material_scope: Any,
+) -> str:
+    """Render the canonical report without falling back to container reprs."""
+    if not isinstance(reading_card, Mapping) or not reading_card or not _text_value(abstract_zh).strip():
+        return ""
+
+    scope = material_scope
+    if not _text_value(scope).strip():
+        scope = reading_card.get("material_scope")
+    scope_html = ""
+    if _text_value(scope).strip():
+        scope_html = _render_paragraphs(f"材料范围：{_text_value(scope).strip()}")
+
+    essence = _string_items(reading_card.get("essence"))
+    design = reading_card.get("design")
+    evidence = reading_card.get("evidence")
+    innovation = _string_items(reading_card.get("innovation"))
+    criticism = _string_items(reading_card.get("criticism"))
+    self_test = reading_card.get("self_test")
+
+    rows = [
+        _section_row("一、原文摘要中文版", _render_paragraphs(abstract_zh)),
+        _section_row("二、精读卡", scope_html),
+        _section_row(
+            "1．本质",
+            "".join(_render_paragraphs(item) for item in essence)
+            or _render_paragraphs("【未报告/材料未提供】"),
+        ),
+        _section_row(
+            "2．设计",
+            _build_design_html(design) or _render_paragraphs("【未报告/材料未提供】"),
+        ),
+        _section_row("3．关键证据", _build_evidence_html(evidence)),
+        _section_row(
+            "4．创新",
+            "".join(_render_paragraphs(item) for item in innovation)
+            or _render_paragraphs("【未报告/材料未提供】"),
+        ),
+        _section_row(
+            "5．批判",
+            "".join(_render_paragraphs(item) for item in criticism)
+            or _render_paragraphs("【未报告/材料未提供】"),
+        ),
+        _section_row(
+            "自测问题",
+            _render_paragraphs(self_test) or _render_paragraphs("【未报告/材料未提供】"),
+        ),
+    ]
+    return "".join(rows)
+
+
+def _is_generation_failure(tldr: Any) -> bool:
+    return _text_value(tldr).lstrip().startswith("生成失败")
+
+
+def _build_fallback_rows(
+    tldr: Any, original_abstract: Any, abstract_zh: Any, material_scope: Any = None
+) -> str:
+    """Render legacy TLDR or an explicit non-translated fallback."""
+    original = _text_value(original_abstract).strip()
+    if _is_generation_failure(tldr):
+        failure = _render_paragraphs(_text_value(tldr).splitlines()[0])
+        if material_scope:
+            failure += _render_paragraphs(f"材料范围：{_text_value(material_scope)}")
+        original_html = _render_paragraphs(original or "【未报告/材料未提供】摘要原文未提供。")
+        return (
+            _section_row("生成失败", failure)
+            + _section_row("摘要原文（未完成翻译）", original_html)
+        )
+
+    if _text_value(abstract_zh).strip():
+        return (
+            _section_row("一、原文摘要中文版", _render_paragraphs(abstract_zh))
+            + _section_row("二、精读卡", _render_paragraphs("【未报告/材料未提供】精读卡未生成。"))
+        )
+
+    legacy = _render_paragraphs(tldr)
+    if legacy:
+        return _section_row("TLDR", legacy)
+    if original:
+        return _section_row("摘要原文（未完成翻译）", _render_paragraphs(original))
+    return ""
+
+
+def get_block_html(
+    title: str,
+    authors: str,
+    rate: str,
+    tldr: str,
+    pdf_url: str,
+    affiliations: str = None,
+    source: str = None,
+    journal: str = None,
+    stars: str = "",
+    title_zh: str = None,
+    abstract_zh: str = None,
+    reading_card: Any = None,
+    material_scope: Any = None,
+    journal_metrics: Any = None,
+    original_abstract: str = None,
+):
+    """Build one valid table card; the positional legacy signature is kept."""
+    source_badge = _build_source_badge(source, journal)
+    source_row = (
+        '<tr><td style="padding:4px 16px 6px;">' + source_badge + "</td></tr>"
+        if source_badge
+        else ""
+    )
+    title_zh_text = _text_value(title_zh).strip()
+    title_zh_row = (
+        '<tr><td style="font-size:15px; color:#555555; padding:2px 16px; line-height:1.6;">'
+        + _render_rich_text(title_zh_text)
+        + "</td></tr>"
+        if title_zh_text
+        else ""
+    )
+
+    # If the primary URL is unsafe, the caller may still have supplied a safe
+    # fallback in pdf_url; direct callers get the explicit unverified label.
+    article_url = _safe_url(pdf_url)
+    article_link = (
+        f'<a href="{article_url}" style="display:inline-block; text-decoration:none; '
+        'font-size:14px; font-weight:bold; color:#ffffff; background-color:#d9534f; '
+        'padding:8px 16px; border-radius:4px;">原文链接</a>'
+        if article_url
+        else '<span style="font-size:14px; color:#777777;">原文链接（未核实）</span>'
+    )
+
+    structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope)
+    report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
+    # Keep the four badges visible even when journal metadata is absent; the
+    # explicit “未核实” values prevent readers from mistaking missing data for
+    # an inferred ranking.
+    metrics_row = _build_journal_metrics_html(journal_metrics)
+    block_template = """
+    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"
+      style="width:100%; max-width:900px; margin:0 auto; font-family:Arial, 'Microsoft YaHei', sans-serif; border:1px solid #dddddd; border-radius:8px; background-color:#f9f9f9;">
+      <tr>
+        <td style="padding:16px 16px 8px; font-size:20px; font-weight:bold; color:#333333; line-height:1.4;">
+          {title}
+        </td>
+      </tr>
+      {title_zh_row}
+      {source_row}
+      {metrics_row}
+      <tr>
+        <td style="padding:4px 16px; font-size:14px; color:#666666; line-height:1.6;">
+          {authors}
+          <br>
+          <i>{affiliations}</i>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:8px 16px; font-size:14px; color:#333333; line-height:1.6;">
+          <strong>Relevance:</strong> {rate} {stars}
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:8px 16px 10px;">
+          {article_link}
+        </td>
+      </tr>
+      {report_rows}
+    </table>
+    """
+    return block_template.format(
+        title=_render_rich_text(title),
+        title_zh_row=title_zh_row,
+        source_row=source_row,
+        metrics_row=metrics_row,
+        authors=_render_rich_text(authors),
+        affiliations=_render_rich_text(affiliations),
+        rate=_render_rich_text(rate),
+        stars=stars or "",
+        article_link=article_link,
+        report_rows=report_rows,
+    )
+
+
+def get_stars(score: float):
     full_star = '<span class="full-star">⭐</span>'
-    half_star = '<span class="half-star">⭐</span>'
+    half_star = '<span class="half-star" style="display:inline-block; width:0.5em; overflow:hidden; white-space:nowrap;">⭐</span>'
     low = 6
     high = 8
     if score <= low:
-        return ''
-    elif score >= high:
+        return ""
+    if score >= high:
         return full_star * 5
-    else:
-        interval = (high-low) / 10
-        star_num = math.ceil((score-low) / interval)
-        full_star_num = int(star_num/2)
-        half_star_num = star_num - full_star_num * 2
-        return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
+    interval = (high - low) / 10
+    star_num = math.ceil((score - low) / interval)
+    full_star_num = int(star_num / 2)
+    half_star_num = star_num - full_star_num * 2
+    return '<div class="star-wrapper">' + full_star * full_star_num + half_star * half_star_num + "</div>"
 
 
 def get_summary_html(summary: str) -> str:
-    return """
-    <table border="0" cellpadding="0" cellspacing="0" width="100%" style="font-family: Arial, sans-serif; border: 2px solid #4a90d9; border-radius: 10px; padding: 20px; background-color: #eef5fb; margin-bottom: 16px;">
-    <tr>
-        <td style="font-size: 18px; font-weight: bold; color: #2c5f8a; padding-bottom: 8px;">
-            📋 本期文献速览
-        </td>
-    </tr>
-    <tr>
-        <td style="font-size: 14px; color: #333; line-height: 1.7;">
-            {summary}
-        </td>
-    </tr>
-    </table>
-    """.format(summary=summary.replace("\n", "<br>"))
+    return (
+        '<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" '
+        'style="width:100%; max-width:900px; margin:0 auto 16px; font-family:Arial, \'Microsoft YaHei\', sans-serif; border:2px solid #4a90d9; border-radius:10px; background-color:#eef5fb;">'
+        '<tr><td style="padding:16px 20px 8px; font-size:18px; font-weight:bold; color:#2c5f8a;">'
+        "📋 本期文献速览"
+        '</td></tr><tr><td style="padding:0 20px 16px; font-size:14px; color:#333333; line-height:1.7;">'
+        + _render_rich_text(summary)
+        + "</td></tr></table>"
+    )
+
+
+def _paper_article_url(paper: Paper) -> str:
+    for candidate in (getattr(paper, "url", None), getattr(paper, "pdf_url", None)):
+        if _safe_url(candidate):
+            return candidate
+    return ""
 
 
 def render_email(papers: list[Paper], summary: str | None = None) -> str:
-    parts = []
-    if len(papers) == 0:
-        return framework.replace('__CONTENT__', get_empty_html())
+    if not papers:
+        return framework.replace("__CONTENT__", get_empty_html())
 
+    parts = []
     if summary:
         parts.append(get_summary_html(summary))
 
-    for p in papers:
-        rate = round(p.score, 1) if p.score is not None else 'Unknown'
-        stars = get_stars(p.score) if p.score is not None else ''
-        author_list = [a for a in p.authors]
-        num_authors = len(author_list)
-        if num_authors <= 5:
-            authors = ', '.join(author_list)
+    for paper in papers:
+        rate = round(paper.score, 1) if paper.score is not None else "Unknown"
+        stars = get_stars(paper.score) if paper.score is not None else ""
+        author_list = list(paper.authors or [])
+        if len(author_list) <= 5:
+            authors = ", ".join(author_list)
         else:
-            authors = ', '.join(author_list[:3] + ['...'] + author_list[-2:])
-        if p.affiliations is not None:
-            affiliations = p.affiliations[:5]
-            affiliations = ', '.join(affiliations)
-            if len(p.affiliations) > 5:
-                affiliations += ', ...'
-        else:
-            affiliations = 'Unknown Affiliation'
-        parts.append(get_block_html(
-            p.title, authors, rate, p.tldr, p.pdf_url or p.url,
-            affiliations=affiliations,
-            source=p.source,
-            journal=p.journal,
-            stars=stars,
-            title_zh=p.title_zh,
-        ))
+            authors = ", ".join(author_list[:3] + ["..."] + author_list[-2:])
 
-    content = '<br>' + '</br><br>'.join(parts) + '</br>'
-    return framework.replace('__CONTENT__', content)
+        if paper.affiliations is not None:
+            affiliation_list = list(paper.affiliations)[:5]
+            affiliations = ", ".join(affiliation_list)
+            if len(paper.affiliations) > 5:
+                affiliations += ", ..."
+        else:
+            affiliations = "Unknown Affiliation"
+
+        parts.append(
+            get_block_html(
+                paper.title,
+                authors,
+                rate,
+                getattr(paper, "tldr", None),
+                _paper_article_url(paper),
+                affiliations=affiliations,
+                source=paper.source,
+                journal=paper.journal,
+                stars=stars,
+                title_zh=paper.title_zh,
+                abstract_zh=getattr(paper, "abstract_zh", None),
+                reading_card=getattr(paper, "reading_card", None),
+                material_scope=getattr(paper, "material_scope", None),
+                journal_metrics=getattr(paper, "journal_metrics", None),
+                original_abstract=getattr(paper, "abstract", None),
+            )
+        )
+
+    content = '<div style="height:16px; line-height:16px;">&nbsp;</div>'.join(parts)
+    return framework.replace("__CONTENT__", content)

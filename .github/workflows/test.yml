@@ -25,6 +25,7 @@ jobs:
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
           OPENAI_API_BASE: https://llm.goaichat.top/v1
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
           export DEBUG=true

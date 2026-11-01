@@ -12,6 +12,7 @@ from .protocol import CorpusPaper
 from datetime import datetime
 from .reranker import get_reranker_cls
 from .construct_email import render_email
+from .journal_metrics import enrich_journal_metrics
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
@@ -350,6 +351,10 @@ class Executor:
                 f"{before_journal_gate - len(all_papers)} non-allowlisted/non-PubMed paper(s)."
             )
 
+        # Look up each journal once, then recheck the IF threshold using the
+        # returned value. Existing audited metadata remains the fallback.
+        all_papers = enrich_journal_metrics(all_papers, journals_config)
+
         reranked_papers = []
         if len(all_papers) > 0:
             # Step 4: rerank with mixed scoring
@@ -366,12 +371,17 @@ class Executor:
                 max_paper_num = min(max_paper_num, 5)
             reranked_papers = reranked_papers[:max_paper_num]
 
-            # Step 5: generate TLDRs, affiliations and Chinese title translations
-            logger.info("Generating TLDR, affiliations and title translations...")
+            # Step 5: generate translated abstracts, reading cards and title translations
+            logger.info("Generating Chinese abstracts, reading cards and title translations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
                 p.generate_affiliations(self.openai_client, self.config.llm)
                 p.generate_title_translation(self.openai_client, self.config.llm)
+            reader_count = sum(p.reading_card is not None for p in reranked_papers)
+            logger.info(
+                f"Reading cards generated: {reader_count}/{len(reranked_papers)}; "
+                f"original-abstract fallbacks: {len(reranked_papers) - reader_count}"
+            )
 
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")

@@ -4,6 +4,13 @@ journals:
   enabled: true
   min_jif: 10.0
   verified_date: "2026-11-01"
+  # Fill EASYSCHOLAR_API_KEY in GitHub Actions Secrets. No key is stored here.
+  # EasyScholar supplements the existing shortlist; it does not expand it.
+  easyscholar:
+    enabled: true
+    api_key: ${oc.env:EASYSCHOLAR_API_KEY,}
+    timeout: 10
+    min_interval: 0.55
   whitelist:
     - name: Nature Aging
       aliases: ["Nat Aging"]
