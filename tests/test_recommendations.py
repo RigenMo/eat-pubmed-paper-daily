@@ -321,3 +321,17 @@ def test_build_zotero_queries_llm_rejects_invented_terms_after_retry():
     with pytest.raises(RecommendationQueryError, match="failed closed"):
         build_zotero_queries(_query_corpus(), openai_client=client, llm_params={})
     assert len(calls) == 2
+
+
+def test_build_zotero_queries_discards_ungrounded_extra_term_but_keeps_each_source():
+    def create(**kwargs):
+        return _chat_response({"queries": [
+            {"id": 0, "terms": ["heart failure", "invented disease"]},
+            {"id": 1, "terms": ["meal timing", "cohort"]},
+        ]})
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    queries = build_zotero_queries(_query_corpus(), openai_client=client, llm_params={})
+    assert any("heart failure" in query for query in queries)
+    assert any("meal timing" in query for query in queries)
+    assert not any("invented" in query or "cohort" in query for query in queries)

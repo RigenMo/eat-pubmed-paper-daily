@@ -402,6 +402,9 @@ class Executor:
             # Query metrics only for the semantic shortlist, across all journals.
             reranked_papers = enrich_journal_metrics(reranked_papers, journals_config)
             if verify_related:
+                # Relevance and IF are eligibility gates. Among eligible
+                # candidates, prioritize actual first publication, not indexing.
+                reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
                 verify_limit = int(recommendation_config.get("verify_limit", 20))
                 reranked_papers = verify_recommendations(
                     reranked_papers[:verify_limit], self.openai_client, self.config.llm,

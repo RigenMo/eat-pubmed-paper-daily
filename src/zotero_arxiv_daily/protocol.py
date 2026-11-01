@@ -24,7 +24,7 @@ _READER_INSTRUCTIONS = """
 事实直接陈述；推断标【推断】；必要信息缺失标【未报告/材料未提供】。
 关键判断附材料中的定位编号，如【摘要段落1】或【正文段落3】。
 只有摘要时必须注明“仅据摘要”，不补造全文、图表或补充材料的细节。
-材料明确出现图表位置时可在段落编号之后补充该位置，禁止臆造图号。
+locator只填写段落编号；材料明确出现的图表位置可写在result中，禁止臆造图号。
 
 只返回合法JSON，不要代码围栏。字段为abstract_zh和reading_card。
 reading_card结构如下：
@@ -133,7 +133,7 @@ class Paper:
                 segments.append(" ".join(current).strip())
         return segments
 
-    def _reader_prompt(self, llm_params: dict) -> tuple[str, str]:
+    def _reader_prompt(self, llm_params: dict) -> tuple[str, str, set[str]]:
         """Build the reader prompt without silently dropping the abstract."""
         if not self.abstract and not self.full_text:
             raise ValueError("摘要与正文材料均未提供")
@@ -142,6 +142,7 @@ class Paper:
         max_input_tokens = max(1, int(llm_params.get("max_input_tokens", 4000)))
         title = self.title or "（标题未提供）"
         abstract_paragraphs = self._split_material(self.abstract or "", structured_headings=True)
+        source_labels = {f"摘要段落{index}" for index in range(1, len(abstract_paragraphs) + 1)}
         abstract = "\n\n".join(
             f"[摘要段落{index}]\n{paragraph}"
             for index, paragraph in enumerate(abstract_paragraphs, start=1)
@@ -163,10 +164,11 @@ class Paper:
 
         if self.full_text:
             paragraphs = self._split_material(self.full_text)
-            numbered_text = "\n\n".join(
+            body_blocks = [
                 f"[正文段落{index}] {paragraph}"
                 for index, paragraph in enumerate(paragraphs, start=1)
-            )
+            ]
+            numbered_text = "\n\n".join(body_blocks)
             full_text_tokens = encoder.encode(numbered_text)
             full_text_truncated = len(full_text_tokens) > remaining_tokens
             excerpt = encoder.decode(full_text_tokens[:remaining_tokens])
@@ -180,6 +182,12 @@ class Paper:
                 scope = "摘要与所提供正文（补充材料未提供）"
             if excerpt.strip():
                 sections.append(f"{full_text_label}\n{excerpt}")
+                offset = 0
+                for index, block in enumerate(body_blocks, start=1):
+                    label = f"正文段落{index}"
+                    if offset + len(label) + 2 <= len(excerpt):
+                        source_labels.add(label)
+                    offset += len(block) + 2
             else:
                 scope = "仅据摘要（正文因输入预算未纳入；补充材料未提供）"
         if not self.abstract:
@@ -192,7 +200,7 @@ class Paper:
         total_tokens = len(encoder.encode(prompt)) + len(encoder.encode(_READER_SYSTEM_PROMPT)) + 16
         if total_tokens > max_input_tokens:
             raise ValueError("材料与精读要求超过输入预算；未截断摘要")
-        return prompt, scope
+        return prompt, scope, source_labels
 
     @staticmethod
     def _normalise_reader_list(value: Any, field: str, length: Optional[int] = None) -> list[str]:
@@ -245,7 +253,9 @@ class Paper:
                 raise ValueError("each evidence item needs claim, comparison, result, locator")
             if source_labels is not None:
                 referenced = set(re.findall(r"(?:摘要|正文)段落\d+", fields["locator"]))
-                if not referenced or not referenced.issubset(source_labels):
+                remainder = re.sub(r"(?:摘要|正文)段落\d+", "", fields["locator"])
+                if (not referenced or not referenced.issubset(source_labels)
+                        or re.search(r"[^\s\[\]【】()（）、,，;；/与及和]", remainder)):
                     raise ValueError("evidence locator does not match the provided source paragraphs")
             clean_evidence.append({key: value.strip() for key, value in fields.items()})
 
@@ -379,14 +389,19 @@ class Paper:
         draft_card: Any,
         validation_error: Exception,
     ) -> dict[str, Any]:
+        repair_prompt = self._reader_repair_prompt(original_prompt, scope, draft_card, validation_error)
+        encoder = self._reader_encoder()
+        max_input_tokens = max(1, int(llm_params.get("max_input_tokens", 4000)))
+        if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
+            repair_prompt = self._reader_repair_prompt(original_prompt, scope, None, validation_error)
+        if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
+            raise ValueError("Card repair source exceeds the input budget; translation retained")
         response = openai_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": _READER_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": self._reader_repair_prompt(
-                        original_prompt, scope, draft_card, validation_error
-                    ),
+                    "content": repair_prompt,
                 },
             ],
             **llm_params.get("generation_kwargs", {}),
@@ -396,7 +411,7 @@ class Paper:
         return self._validate_reader_card(card, scope, source_labels)
 
     def _generate_tldr_with_llm(self, openai_client: OpenAI, llm_params: dict) -> dict[str, Any]:
-        prompt, scope = self._reader_prompt(llm_params)
+        prompt, scope, source_labels = self._reader_prompt(llm_params)
         response = openai_client.chat.completions.create(
             messages=[
                 {
@@ -416,7 +431,6 @@ class Paper:
         self.abstract_zh = abstract_zh
         self.reading_card = None
         self.material_scope = scope
-        source_labels = set(re.findall(r"\[((?:摘要|正文)段落\d+)\]", prompt))
         try:
             card = self._validate_reader_card(payload.get("reading_card"), scope, source_labels)
         except ValueError as validation_error:

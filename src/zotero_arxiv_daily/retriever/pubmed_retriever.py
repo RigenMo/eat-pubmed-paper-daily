@@ -1,4 +1,5 @@
 import re
+import calendar
 import requests
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -229,6 +230,26 @@ def _full_date_key(value: str) -> tuple[int, int, int] | None:
     return parsed.year, parsed.month, parsed.day
 
 
+def _publication_in_window(value: str | None, start, today) -> bool:
+    """Accept only dates whose entire stated precision fits the window."""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}(?:-\d{2}(?:-\d{2})?)?", value):
+        return False
+    parts = [int(part) for part in value.split("-")]
+    try:
+        year = parts[0]
+        month = parts[1] if len(parts) > 1 else 1
+        day = parts[2] if len(parts) > 2 else 1
+        first = datetime(year, month, day).date()
+        last = first
+        if len(parts) == 1:
+            last = datetime(year, 12, 31).date()
+        elif len(parts) == 2:
+            last = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+    except ValueError:
+        return False
+    return start <= first and last <= today
+
+
 def _pubmed_source(pmid: str) -> str:
     return f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else ""
 
@@ -442,6 +463,12 @@ class PubMedRetriever(BaseRetriever):
         self._pubmed_queries: list[str] = []          # corpus/theme queries for mode 5
         self._pubmed_queries_configured = False
         self._max_results: int = int(self.retriever_config.get("max_results", 200))
+        recommendation_config = config.get("recommendations", {})
+        self._publication_days = int(config.executor.get("retrieval_days", 1))
+        if recommendation_config.get("enabled", False) and int(config.search.mode) == 5:
+            self._publication_days = int(recommendation_config.get("publication_days", 30))
+        if self._publication_days < 1:
+            raise ValueError("Publication window must be at least one day")
 
         # Journal filtering is deliberately fail-closed. A configured but
         # empty allowlist must never turn into an unrestricted PubMed query.
@@ -527,20 +554,16 @@ class PubMedRetriever(BaseRetriever):
     # ------------------------------------------------------------------
 
     def _date_filter(self) -> str:
-        """Return the recent PubMed-indexing window used for candidates.
+        """Search publication and electronic dates using explicit UTC bounds.
 
-        EDAT is the date a citation was added to PubMed, not its journal
-        publication date.  The publication date shown in the email is parsed
-        independently from the EFetch XML record.  Both bounds are explicit
-        UTC calendar dates so the upper bound never reaches into the future.
+        https://pubmed.ncbi.nlm.nih.gov/help/#publication-date-dp
         """
-        retrieval_days = int(self.config.executor.get("retrieval_days", 1))
+        retrieval_days = self._publication_days
         today = datetime.now(timezone.utc).date()
         start = today - timedelta(days=retrieval_days)
-        return (
-            f'("{start.strftime("%Y/%m/%d")}"[EDAT] : '
-            f'"{today.strftime("%Y/%m/%d")}"[EDAT])'
-        )
+        lower = start.strftime("%Y/%m/%d")
+        upper = today.strftime("%Y/%m/%d")
+        return f'(("{lower}"[PDAT] : "{upper}"[PDAT]) OR ("{lower}"[EPDAT] : "{upper}"[EPDAT]))'
 
     def _fetch_pmids(self, query: str) -> list[str]:
         if self._journal_filter_enabled:
@@ -596,6 +619,19 @@ class PubMedRetriever(BaseRetriever):
                 records = _parse_pubmed_xml(response_text)
             else:
                 records = _parse_medline(response_text)
+                for record in records:
+                    dep = record.get("DEP", "")
+                    if isinstance(dep, str) and re.fullmatch(r"\d{8}", dep):
+                        record["publication_date"] = f"{dep[:4]}-{dep[4:6]}-{dep[6:]}"
+                    elif not dep:
+                        dp = record.get("DP", "")
+                        if isinstance(dp, str):
+                            match = re.fullmatch(r"(\d{4})(?: ([A-Za-z]+)(?: (\d{1,2}))?)?", dp)
+                            if match:
+                                year, month, day = match.groups()
+                                number = _normalise_pubmed_month(month) if month else None
+                                if not month or number:
+                                    record["publication_date"] = year + (f"-{number}" if number else "") + (f"-{int(day):02d}" if day else "")
             if not records:
                 raise ValueError(
                     "PubMed EFetch returned no parseable records for the requested PMID batch"
@@ -632,6 +668,12 @@ class PubMedRetriever(BaseRetriever):
 
         def _strip_tiab(q: str) -> str:
             return re.sub(r"\[tiab\]", "", q).strip()
+
+        def _recent_results(ids: list[str]) -> list[dict[str, Any]]:
+            records = self._finalise(ids)
+            today = datetime.now(timezone.utc).date()
+            start = today - timedelta(days=self._publication_days)
+            return [record for record in records if _publication_in_window(record.get("publication_date"), start, today)]
 
         pmids: list[str] = []
 
@@ -678,7 +720,7 @@ class PubMedRetriever(BaseRetriever):
             if not selected:
                 logger.warning("PubMed: no results found for corpus/theme queries")
                 return []
-            return self._finalise(selected)
+            return _recent_results(selected)
 
         # Mode 5 deliberately has no keyword query: retrieve the recent PubMed
         # window first, then let the Zotero-based reranker select relevant papers.
@@ -697,19 +739,19 @@ class PubMedRetriever(BaseRetriever):
             if not pmids:
                 logger.warning("PubMed: no results found for the date-only query")
                 return []
-            return self._finalise(pmids)
+            return _recent_results(pmids)
 
         # ── Level 1: strict query (1-2 AND concept groups, [tiab]) ──────────
         if self._pubmed_query:
             pmids = _try("strict", self._pubmed_query)
             if len(pmids) >= min_n:
-                return self._finalise(pmids)
+                return _recent_results(pmids)
 
         # ── Level 2: strict without [tiab] → full-field search ──────────────
         if self._pubmed_query and "[tiab]" in self._pubmed_query:
             pmids_fb = _try("strict|no-tiab", _strip_tiab(self._pubmed_query))
             if len(pmids_fb) >= min_n:
-                return self._finalise(pmids_fb)
+                return _recent_results(pmids_fb)
             if len(pmids_fb) > len(pmids):
                 pmids = pmids_fb   # keep the better count for later
 
@@ -717,7 +759,7 @@ class PubMedRetriever(BaseRetriever):
         if self._pubmed_broad_query:
             pmids_fb = _try("broad", self._pubmed_broad_query)
             if len(pmids_fb) >= min_n:
-                return self._finalise(pmids_fb)
+                return _recent_results(pmids_fb)
             if len(pmids_fb) > len(pmids):
                 pmids = pmids_fb
 
@@ -732,7 +774,7 @@ class PubMedRetriever(BaseRetriever):
             return []
 
         logger.info(f"PubMed: using {len(pmids)} PMIDs (best fallback level)")
-        return self._finalise(pmids)
+        return _recent_results(pmids)
 
     def _finalise(self, pmids: list[str]) -> list[dict[str, Any]]:
         logger.info(f"PubMed: fetching details for {len(pmids)} PMIDs...")

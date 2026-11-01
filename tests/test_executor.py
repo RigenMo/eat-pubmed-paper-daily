@@ -521,3 +521,32 @@ def test_zotero_only_mode_builds_source_queries_before_pubmed_retrieval(config, 
 
     assert executor.run() == 0
     assert injected and all("[tiab]" in query for query in injected)
+
+
+def test_related_if_eligible_papers_prioritize_publication_date(config, monkeypatch):
+    from tests.canned_responses import make_sample_paper
+
+    config.recommendations.enabled = True
+    config.recommendations.max_papers = 2
+    config.recommendations.max_per_journal = 2
+    newer = make_sample_paper(title="Newer", publication_date="2026-11-01")
+    older = make_sample_paper(title="Older", publication_date="2026-10-25")
+    executor = _delivery_executor(config, [older, newer])
+    executor._search_mode = 2
+    executor.fetch_zotero_corpus = lambda: [CorpusPaper("Anchor", "Abstract", datetime(2026, 1, 1), [])]
+    executor.filter_corpus = lambda corpus: corpus
+    checked = []
+
+    def verify(papers, *args, **kwargs):
+        checked.extend(papers)
+        return papers
+
+    monkeypatch.setattr("zotero_arxiv_daily.executor.enrich_journal_metrics", lambda papers, *args: papers)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.verify_recommendations", verify)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_tldr", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_title_translation", lambda *args: None)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda *args, **kwargs: "HTML")
+
+    assert executor.run(send_mail=False) == 2
+    assert checked == [newer, older]
+    assert executor.last_papers == [newer, older]

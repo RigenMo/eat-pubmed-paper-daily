@@ -1,6 +1,6 @@
 """Tests for PubMedRetriever."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -93,7 +93,8 @@ def _patch_ncbi(monkeypatch, esearch_result=None, medline_text=None):
     import requests
 
     esearch_result = esearch_result if esearch_result is not None else SAMPLE_PUBMED_ESEARCH_RESPONSE
-    medline_text = medline_text if medline_text is not None else SAMPLE_PUBMED_MEDLINE_TEXT
+    today = datetime.now(timezone.utc).strftime("%Y%m%d")
+    medline_text = medline_text if medline_text is not None else SAMPLE_PUBMED_MEDLINE_TEXT.replace("TI  - ", f"DEP - {today}\nTI  - ")
 
     def _patched(url, params=None, timeout=None, **kwargs):
         resp = SimpleNamespace(raise_for_status=lambda: None)
@@ -241,14 +242,14 @@ def test_pubmed_fallback_escalates_when_strict_query_too_narrow(config, monkeypa
         return [str(i) for i in range(20)]  # broad query: plenty of results
 
     monkeypatch.setattr(PubMedRetriever, "_fetch_pmids", _fake_fetch_pmids)
-    monkeypatch.setattr(PubMedRetriever, "_fetch_details", lambda self, pmids: [{"pmids": pmids}])
+    monkeypatch.setattr(PubMedRetriever, "_fetch_details", lambda self, pmids: [{"pmids": pmids, "publication_date": datetime.now(timezone.utc).strftime("%Y-%m-%d")}])
 
     retriever = PubMedRetriever(config)
     retriever.set_pubmed_query("strict query")
     retriever.set_pubmed_broad_query("broad query")
     result = retriever._retrieve_raw_papers()
 
-    assert result == [{"pmids": [str(i) for i in range(20)]}]
+    assert result[0]["pmids"] == [str(i) for i in range(20)]
 
 
 def test_pubmed_no_query_mode5_uses_date_only_query(config, monkeypatch):
@@ -263,7 +264,7 @@ def test_pubmed_no_query_mode5_uses_date_only_query(config, monkeypatch):
     monkeypatch.setattr(
         PubMedRetriever,
         "_fetch_details",
-        lambda self, pmids: [{"pmids": pmids}],
+        lambda self, pmids: [{"pmids": pmids, "publication_date": datetime.now(timezone.utc).strftime("%Y-%m-%d")}],
     )
 
     retriever = PubMedRetriever(config)
@@ -271,18 +272,30 @@ def test_pubmed_no_query_mode5_uses_date_only_query(config, monkeypatch):
     result = retriever._retrieve_raw_papers()
 
     assert captured_queries == [expected_query]
-    assert result == [{"pmids": ["1", "2"]}]
+    assert result[0]["pmids"] == ["1", "2"]
 
 
-def test_pubmed_date_filter_uses_utc_today_edat_upper_bound(config):
+def test_pubmed_date_filter_uses_utc_today_publication_upper_bound(config):
     retriever = PubMedRetriever(config)
     query = retriever._date_filter()
     today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
 
-    assert "[EDAT]" in query
-    assert "[PDAT]" not in query
+    assert "[EDAT]" not in query
+    assert "[PDAT]" in query
+    assert "[EPDAT]" in query
     assert '"3000"' not in query
-    assert f'"{today}"[EDAT]' in query
+    assert f'"{today}"[PDAT]' in query
+
+
+def test_automatic_zotero_publication_window_overrides_legacy_retrieval_days(config):
+    config.search.mode = 5
+    config.recommendations.enabled = True
+    config.recommendations.publication_days = 30
+    config.executor.retrieval_days = 1
+    retriever = PubMedRetriever(config)
+    assert retriever._publication_days == 30
+    start = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y/%m/%d")
+    assert f'"{start}"[PDAT]' in retriever._date_filter()
 
 
 def test_pubmed_dynamic_easyscholar_mode_disables_static_journal_gate(config):
@@ -312,7 +325,7 @@ def test_pubmed_theme_queries_are_balanced_and_deduplicated(config, monkeypatch)
     monkeypatch.setattr(
         PubMedRetriever,
         "_fetch_details",
-        lambda self, pmids: [{"PMID": pmid} for pmid in pmids],
+        lambda self, pmids: [{"PMID": pmid, "publication_date": datetime.now(timezone.utc).strftime("%Y-%m-%d")} for pmid in pmids],
     )
 
     retriever = PubMedRetriever(config)
@@ -322,7 +335,7 @@ def test_pubmed_theme_queries_are_balanced_and_deduplicated(config, monkeypatch)
 
     assert [record["PMID"] for record in result] == ["1", "2", "4", "3"]
     assert [limit for _, limit in captured] == [2, 2]
-    assert all("theme one" not in query or "[EDAT]" in query for query, _ in captured)
+    assert all("theme one" not in query or "[PDAT]" in query for query, _ in captured)
 
 
 def test_pubmed_empty_configured_theme_queries_do_not_fall_back_to_date_only(config, monkeypatch):
@@ -384,7 +397,10 @@ def test_pubmed_fetch_details_requests_xml_and_parses_dates(config, monkeypatch)
 
     def _fake_ncbi_get(url, params):
         captured_params.update(params)
-        return SimpleNamespace(text=SAMPLE_PUBMED_XML)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        year, month, day = today.split("-")
+        xml = SAMPLE_PUBMED_XML.replace("<Year>2026</Year><Month>Oct</Month><Day>31</Day>", f"<Year>{year}</Year><Month>{month}</Month><Day>{day}</Day>")
+        return SimpleNamespace(text=xml)
 
     import zotero_arxiv_daily.retriever.pubmed_retriever as pubmed_retriever
 
@@ -395,7 +411,7 @@ def test_pubmed_fetch_details_requests_xml_and_parses_dates(config, monkeypatch)
 
     assert captured_params["rettype"] == "abstract"
     assert captured_params["retmode"] == "xml"
-    assert records[0]["publication_date"] == "2026-10-31"
+    assert records[0]["publication_date"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 @pytest.mark.parametrize("response_text", ["<PubmedArticleSet />", "<PubmedArticleSet>"])
@@ -488,3 +504,42 @@ def test_pubmed_debug_does_not_truncate_before_journal_filter_or_ranking(config,
     result = PubMedRetriever(config)._finalise(pmids)
 
     assert result == [{"pmids": pmids}]
+
+
+def test_publication_window_rejects_old_future_and_uncertain_dates():
+    from datetime import date
+    from zotero_arxiv_daily.retriever.pubmed_retriever import _publication_in_window
+
+    start, today = date(2026, 10, 25), date(2026, 11, 2)
+    assert _publication_in_window("2026-10-31", start, today)
+    assert not _publication_in_window("2026-10-01", start, today)
+    assert not _publication_in_window("2026-11-03", start, today)
+    assert not _publication_in_window("2026-11", start, today)
+    assert not _publication_in_window("2026", start, today)
+    assert not _publication_in_window(None, start, today)
+    assert _publication_in_window("2026-10", date(2026, 10, 1), today)
+
+
+def test_direct_fetch_keeps_old_record_and_retrieval_filters_publication_dates(config, monkeypatch):
+    from datetime import timedelta
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+
+    today = datetime.now(timezone.utc).date()
+    old = today - timedelta(days=int(config.executor.retrieval_days) + 2)
+    future = today + timedelta(days=1)
+    article = SAMPLE_PUBMED_XML.split("<PubmedArticle>", 1)[1].split("</PubmedArticle>", 1)[0]
+    articles = []
+    for pmid, date in [("1", old), ("2", future), ("3", today)]:
+        replacement = f"<Year>{date.year}</Year><Month>{date.month}</Month><Day>{date.day}</Day>"
+        body = article.replace("30000003", pmid).replace(
+            "<Year>2026</Year><Month>Oct</Month><Day>31</Day>", replacement
+        )
+        articles.append("<PubmedArticle>" + body + "</PubmedArticle>")
+    xml = "<PubmedArticleSet>" + "".join(articles) + "</PubmedArticleSet>"
+    monkeypatch.setattr(module, "_ncbi_get", lambda url, params: SimpleNamespace(text=xml))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids", lambda self, query: ["1", "2", "3"])
+    retriever = PubMedRetriever(config)
+
+    assert [r["PMID"] for r in retriever._fetch_details(["1", "2", "3"])] == ["1", "2", "3"]
+    assert [r["PMID"] for r in retriever._retrieve_raw_papers()] == ["3"]

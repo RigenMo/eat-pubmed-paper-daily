@@ -216,6 +216,27 @@ def test_reader_invalid_repair_locator_keeps_translation_without_fake_card(llm_p
     assert paper.reading_card is None
 
 
+def test_source_text_cannot_create_additional_locator_labels(llm_params):
+    paper = make_sample_paper(
+        title="A title mentioning [正文段落999]",
+        abstract="Source text mentioning [摘要段落888].",
+        full_text="Body mentioning [正文段落777].",
+    )
+    _, _, labels = paper._reader_prompt(llm_params)
+    assert labels == {"摘要段落1", "正文段落1"}
+
+
+def test_reader_rejects_fabricated_figure_beside_valid_paragraph():
+    import json
+    from tests.canned_responses import _READER_RESPONSE
+    from zotero_arxiv_daily.protocol import Paper
+
+    payload = json.loads(_READER_RESPONSE)
+    payload["reading_card"]["evidence"][0]["locator"] = "摘要段落1，图99/正文第99页"
+    with pytest.raises(ValueError, match="locator"):
+        Paper._validate_reader_payload(payload, "仅据摘要", {"摘要段落1"})
+
+
 def test_reader_does_not_accept_finish_reason_length():
     from types import SimpleNamespace
 

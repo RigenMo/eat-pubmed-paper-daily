@@ -1,7 +1,7 @@
 """Corpus-grounded PubMed queries and conservative recommendation checks.
 
-The query builder is deliberately deterministic: it can only emit phrases
-that occur in the supplied Zotero titles.  The verifier is a second, narrow
+The query builder can only emit phrases grounded in the supplied Zotero
+titles or abstracts. The verifier is a second, narrow
 gate after semantic reranking.  It uses the candidate abstract and the
 nearest Zotero abstracts as evidence, but never treats a similarity score as
 proof of topical relatedness.
@@ -13,6 +13,7 @@ import json
 import re
 import unicodedata
 from typing import Any
+from loguru import logger
 
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 
@@ -393,9 +394,9 @@ def _validate_llm_query_payload(
 
     terms_by_id: dict[str, list[str]] = {}
     for item in payload["queries"]:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+        if not isinstance(item, dict) or isinstance(item.get("id"), bool) or not isinstance(item.get("id"), (str, int)):
             raise _RecommendationValidationError("query extraction has an invalid source ID")
-        source_id = item["id"]
+        source_id = str(item["id"])
         if source_id not in expected or source_id in seen:
             raise _RecommendationValidationError("query extraction IDs are not unique and known")
         seen.add(source_id)
@@ -406,14 +407,16 @@ def _validate_llm_query_payload(
         normalized_terms = []
         for term in terms:
             if not isinstance(term, str) or not _llm_term_is_usable(term):
-                raise _RecommendationValidationError("query extraction term is too generic")
+                continue
             normalized_term = _normalise_title(term)
             if normalized_term in normalized_terms:
-                raise _RecommendationValidationError("query extraction terms are duplicated")
+                continue
             title_text, abstract_text = source_text[source_id]
             if normalized_term not in title_text and normalized_term not in abstract_text:
-                raise _RecommendationValidationError("query extraction term is not source grounded")
+                continue
             normalized_terms.append(normalized_term)
+        if not normalized_terms:
+            raise _RecommendationValidationError(f"query extraction has no source-grounded topic for Source ID {source_id}")
         terms_by_id[source_id] = normalized_terms
 
     if seen != expected:
@@ -430,13 +433,16 @@ def _build_llm_zotero_queries(
     records = _llm_query_records(corpus)
     material = _llm_query_material(records)
     validated = None
+    last_error = ""
     for attempt in range(2):
         correction = "" if attempt == 0 else (
             "Correction: return every supplied Source ID exactly once; each term must be a literal "
-            "normalized substring of that source title or abstract excerpt, with no generic design or count terms."
+            "normalized substring of that source title or abstract excerpt, with no generic design or count terms. "
+            + last_error
         )
         try:
             kwargs = _generation_kwargs(llm_params)
+            kwargs.setdefault("response_format", {"type": "json_object"})
             user_content = material + (f"\n\n{correction}" if correction else "")
             response = openai_client.chat.completions.create(
                 messages=[
@@ -447,7 +453,10 @@ def _build_llm_zotero_queries(
             )
             validated = _validate_llm_query_payload(_response_text(response), records)
             break
-        except _RecommendationValidationError:
+        except _RecommendationValidationError as error:
+            # These fixed validation messages contain no source text or secrets.
+            last_error = str(error)
+            logger.warning("Automatic query validation: {}", last_error)
             if attempt == 1:
                 raise RecommendationQueryError(
                     "Automatic Zotero query extraction failed closed validation"
