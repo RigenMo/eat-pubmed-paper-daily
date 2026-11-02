@@ -41,7 +41,8 @@ llm:
   api:
     key: ??? # API Key of your LLM API. Example: sk-xxx
     base_url: ??? # API URL of your LLM API. Example: https://api.openai.com/v1
-    timeout: 600 # OpenAI-compatible API request timeout in seconds. Example: 9000
+    timeout: 600 # HTTP timeout in seconds; the workflow also has a total runtime limit.
+    max_retries: 1 # One retry for transient failures, avoiding hours of repeated waiting.
   generation_kwargs:
   # Arguments for the LLM API. See [here](https://platform.openai.com/docs/api-reference/chat/create) for more details.
     max_tokens: 16384

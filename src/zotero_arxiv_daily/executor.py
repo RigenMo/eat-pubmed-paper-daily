@@ -55,6 +55,7 @@ class Executor:
             api_key=config.llm.api.key,
             base_url=config.llm.api.base_url,
             timeout=llm_timeout,
+            max_retries=int(config.llm.api.get("max_retries", 1)),
         )
 
         # Validate search mode vs keywords
