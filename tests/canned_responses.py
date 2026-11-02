@@ -224,7 +224,7 @@ def make_stub_smtp(sent_emails: list):
         def __init__(self, *args, **kwargs):
             pass
 
-        def starttls(self):
+        def starttls(self, context=None):
             pass
 
         def login(self, user, password):
@@ -234,6 +234,9 @@ def make_stub_smtp(sent_emails: list):
             sent_emails.append((sender, recipients, msg))
 
         def quit(self):
+            pass
+
+        def close(self):
             pass
 
     return StubSMTP
@@ -339,3 +342,4 @@ SAMPLE_PUBMED_MEDLINE_TEXT = (
     "JT  - The Lancet\n"
     "\n"
 )
+

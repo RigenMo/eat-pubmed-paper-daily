@@ -14,7 +14,7 @@ llm:
   api:
     key: ${oc.env:OPENAI_API_KEY}
     base_url: https://llm.goaichat.top/v1
-    timeout: 9000
+    timeout: 600
   generation_kwargs:
     model: kimi-k3
     max_tokens: 65536
@@ -28,3 +28,4 @@ source:
 executor:
   debug: ${oc.env:DEBUG,null}
   source: ['arxiv']
+

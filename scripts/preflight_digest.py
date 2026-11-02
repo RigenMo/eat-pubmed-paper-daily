@@ -35,6 +35,7 @@ def main(config: DictConfig):
         client = OpenAI(
             api_key=config.llm.api.key, base_url=config.llm.api.base_url,
             timeout=float(config.llm.api.timeout),
+            max_retries=int(config.llm.api.get("max_retries", 1)),
         )
         for paper in papers:
             paper.generate_tldr(client, config.llm)

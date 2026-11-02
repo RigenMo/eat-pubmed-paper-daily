@@ -2,6 +2,7 @@ import tarfile
 import re
 import glob
 import smtplib
+import ssl
 from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import parseaddr, formataddr
@@ -109,17 +110,30 @@ def send_email(config:DictConfig, html:str):
     today = datetime.datetime.now().strftime('%Y/%m/%d')
     msg['Subject'] = Header(f'Eat Paper Daily {today}', 'utf-8').encode()
 
-    try:
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-    except Exception as e:
-        logger.debug(f"Failed to use TLS. {e}\nTry to use SSL.")
-        try:
-            server = smtplib.SMTP_SSL(smtp_server, smtp_port)
-        except Exception as e:
-            logger.debug(f"Failed to use SSL. {e}\nTry to use plain text.")
-            server = smtplib.SMTP(smtp_server, smtp_port)
+    if int(smtp_port) == 465:
+        server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30, context=ssl.create_default_context())
+    else:
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
 
-    server.login(sender, password)
-    server.sendmail(sender, [receiver], msg.as_string())
-    server.quit()
+    try:
+        if int(smtp_port) != 465:
+            server.starttls(context=ssl.create_default_context())
+        server.login(sender, password)
+        server.sendmail(sender, [receiver], msg.as_string())
+    except Exception:
+        try:
+            server.close()
+        except Exception:
+            pass
+        raise
+
+    logger.info("SMTP server accepted the message.")
+    try:
+        server.quit()
+    except Exception:
+        logger.warning("SMTP QUIT failed after the message was accepted.")
+        try:
+            server.close()
+        except Exception:
+            pass
+
