@@ -1,12 +1,15 @@
 name: Test
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/send-verified-digest-20261102
 permissions:
   contents: read
   actions: read
 jobs:
   send-one:
-    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1
+    if: github.run_attempt == 1 && (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[send-one-verified]'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
