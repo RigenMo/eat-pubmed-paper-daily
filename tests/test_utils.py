@@ -191,6 +191,30 @@ def test_send_email_quit_failure_after_acceptance(config, monkeypatch):
     assert len(sent) == 1
 
 
+@pytest.mark.parametrize("subject, expected", [
+    (None, "Eat Paper Daily 2026/11/03"),
+    ("Eat Paper Daily 2026/11/03（生成失败）", "Eat Paper Daily 2026/11/03（生成失败）"),
+])
+def test_send_email_china_date_and_optional_notice_subject(config, monkeypatch, subject, expected):
+    import datetime
+    from email import message_from_string
+    from email.header import decode_header, make_header
+    from zotero_arxiv_daily import utils
+
+    utc_time = datetime.datetime(2026, 11, 2, 23, 10, tzinfo=datetime.timezone.utc)
+    class FixedDateTime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return utc_time.astimezone(tz) if tz else utc_time.replace(tzinfo=None)
+
+    sent = []
+    monkeypatch.setattr(utils.datetime, "datetime", FixedDateTime)
+    monkeypatch.setattr(smtplib, "SMTP", make_stub_smtp(sent))
+    send_email(config, "hello", subject=subject)
+    message = message_from_string(sent[0][2])
+    assert str(make_header(decode_header(message["Subject"]))) == expected
+
+
 # ---------------------------------------------------------------------------
 # extract_tex_code_from_tar
 # ---------------------------------------------------------------------------

@@ -26,20 +26,6 @@ framework = """<!DOCTYPE html>
 """
 
 
-_SOURCE_BADGE_STYLES = {
-    "pubmed": "background-color:#0066cc; color:#fff;",
-    "arxiv": "background-color:#b31b1b; color:#fff;",
-    "biorxiv": "background-color:#9b4dca; color:#fff;",
-    "medrxiv": "background-color:#2a9d8f; color:#fff;",
-}
-_SOURCE_LABELS = {
-    "pubmed": "PubMed",
-    "arxiv": "arXiv",
-    "biorxiv": "bioRxiv",
-    "medrxiv": "medRxiv",
-}
-
-
 def _text_value(value: Any) -> str:
     """Return scalar text only; never expose Python container repr in email."""
     if value is None or isinstance(value, (Mapping, list, tuple, set)):
@@ -116,20 +102,13 @@ def _metric_text(value: Any, unknown: str = "未提供") -> str:
 def _metric_badge(
     label: str,
     value: str,
-    source: Any = None,
 ) -> str:
-    source_url = _safe_url(source)
-    source_link = (
-        f' <a href="{source_url}" style="margin-left:6px; color:#664d03; font-size:11px;">来源</a>'
-        if source_url
-        else '<span style="margin-left:6px; color:#8a6d3b; font-size:11px;">来源未核实</span>'
-    )
     return (
         '<span style="display:inline-block; margin:2px 5px 2px 0; padding:5px 8px; '
         'border-radius:4px; background-color:#fff3cd; color:#664d03; font-size:12px; '
         'line-height:1.45; max-width:100%; box-sizing:border-box; white-space:normal; '
         'overflow-wrap:anywhere; word-break:break-word;">'
-        f"<strong>{escape(label, quote=False)}：{value}</strong>{source_link}</span>"
+        f"<strong>{escape(label, quote=False)}：{value}</strong></span>"
     )
 
 
@@ -161,18 +140,13 @@ def _build_journal_metrics_html(metrics: Any) -> str:
     cas_category = _metric_value(metrics, "cas_category")
     cas_quartile = _metric_value(metrics, "cas_quartile")
     cas_year = _metric_value(metrics, "cas_year")
-    cas_source = _metric_value(metrics, "cas_source")
     cas_version = _text_value(_metric_value(metrics, "cas_version")).strip()
 
     jif = _metric_value(metrics, "jif")
     jif_year = _metric_value(metrics, "jif_year", "year")
-    # ``source`` belongs to the overall impact-factor record. JCR and CAS use
-    # their own explicit source fields and never inherit it.
-    jif_source = _metric_value(metrics, "source")
     jcr_category = _metric_value(metrics, "jcr_category")
     jcr_quartile = _metric_value(metrics, "jcr_quartile")
     jcr_year = _metric_value(metrics, "jcr_year")
-    jcr_source = _metric_value(metrics, "jcr_source")
 
     jcr_parts = []
     if _text_value(jcr_category).strip():
@@ -197,7 +171,7 @@ def _build_journal_metrics_html(metrics: Any) -> str:
         scalar_value = " / ".join(scalar_parts) or "未提供"
         if _text_value(cas_year).strip():
             scalar_value += f"（{escape(_text_value(cas_year).strip(), quote=False)}）"
-        cas_badges.append(_metric_badge("中科院分区", scalar_value, cas_source))
+        cas_badges.append(_metric_badge("中科院分区", scalar_value))
     for level, label in (
         ("big", "中科院分区大类"),
         ("small", "中科院分区小类"),
@@ -219,18 +193,17 @@ def _build_journal_metrics_html(metrics: Any) -> str:
         if _text_value(cas_year).strip():
             cas_value += f"（{escape(_text_value(cas_year).strip(), quote=False)}）"
         cas_badges.append(
-            _metric_badge(label, cas_value, cas_source)
+            _metric_badge(label, cas_value)
         )
 
     jif_value = _with_year(jif, jif_year)
     badges = [
-        _metric_badge("JIF(影响因子)", jif_value, jif_source),
-        _metric_badge("JCR分区", jcr_value, jcr_source),
+        _metric_badge("JIF(影响因子)", jif_value),
+        _metric_badge("JCR分区", jcr_value),
         *cas_badges,
     ]
     return (
         '<tr><td style="padding:5px 16px 8px; font-size:12px; line-height:1.5;">'
-        '<div style="margin-bottom:3px; color:#555555;"><strong>期刊指标</strong></div>'
         + "".join(badges)
         + "</td></tr>"
     )
@@ -247,27 +220,6 @@ def get_empty_html() -> str:
         "未放宽主题相关性或期刊条件来补足数量</span>"
         "</td></tr></table>"
     )
-
-
-def _build_source_badge(source: str | None, journal: str | None) -> str:
-    """Return an escaped source badge and optional journal name."""
-    source_text = _text_value(source).strip()
-    if not source_text:
-        return ""
-    source_key = source_text.lower()
-    style = _SOURCE_BADGE_STYLES.get(source_key, "background-color:#555; color:#fff;")
-    label = _SOURCE_LABELS.get(source_key, source_text.upper())
-    badge = (
-        f'<span style="{style} border-radius:3px; padding:2px 7px; '
-        f'font-size:12px; font-weight:bold;">{escape(label, quote=False)}</span>'
-    )
-    journal_text = _text_value(journal).strip()
-    if journal_text:
-        badge += (
-            f'&nbsp;<span style="color:#555; font-style:italic; font-size:12px;">'
-            f"{escape(journal_text, quote=False)}</span>"
-        )
-    return badge
 
 
 def _section_row(heading: str, content: str) -> str:
@@ -481,8 +433,8 @@ def _build_publication_html(
 ) -> str:
     """Render actual dates only; preserve the chronology supplied upstream."""
     publication_text = _text_value(publication_date).strip()
-    publication_source_url = ""
     history_items = []
+    has_extra_history = False
     if isinstance(publication_history, list):
         for item in publication_history:
             if not isinstance(item, Mapping):
@@ -491,15 +443,9 @@ def _build_publication_html(
             label = _publication_event_label(item.get("event"))
             if not date_text or not label:
                 continue
-            source_url = _safe_url(item.get("source"))
-            # Keep the publication date in the chronological history too.
-            if label == "发表" and publication_text and date_text == publication_text:
-                publication_source_url = publication_source_url or source_url
+            if label not in {"发表", "在线发表", "卷期发表"} or date_text != publication_text:
+                has_extra_history = True
             date_html = escape(date_text, quote=False)
-            if source_url:
-                date_html += (
-                    f' <a href="{source_url}" style="color:#2c5f8a; font-size:11px;">来源</a>'
-                )
             history_items.append(
                 f'<span style="display:inline-block; margin:0 10px 3px 0;">'
                 f"<strong>{escape(label, quote=False)}</strong>：{date_html}</span>"
@@ -508,15 +454,11 @@ def _build_publication_html(
     rows = []
     if publication_text:
         publication_date_html = escape(publication_text, quote=False)
-        if publication_source_url:
-            publication_date_html += (
-                f' <a href="{publication_source_url}" style="color:#2c5f8a; font-size:11px;">来源</a>'
-            )
         rows.append(
             '<div style="margin:2px 0; color:#555555;">'
             f"<strong>首次发表/发表日期：</strong>{publication_date_html}</div>"
         )
-    if history_items:
+    if history_items and (has_extra_history or not publication_text):
         rows.append(
             '<div style="margin:2px 0; color:#555555;">'
             "<strong>出版历程：</strong>"
@@ -547,27 +489,16 @@ def _build_recommendation_html(matches: Any) -> str:
         if not isinstance(match, Mapping):
             continue
         reason = _text_value(match.get("reason")).strip()
-        title = _text_value(match.get("anchor_title")).strip()
-        anchor_url = _safe_url(match.get("anchor_url"))
-        if not reason and not title:
+        if not reason:
             continue
-
-        source_title = _render_rich_text(title) if title else "Zotero 文献"
-        if anchor_url:
-            source_title = f'<a href="{anchor_url}">{source_title}</a>'
         reason_html = _render_rich_text(reason)
-        if reason_html and title:
-            reason_html += f"（来源：{source_title}）"
-        elif reason_html:
-            reason_html += f"（来源：{source_title}）" if anchor_url else ""
-        else:
-            reason_html = source_title
         entries.append(
             '<p style="margin:4px 0; font-size:13px; line-height:1.6; '
             'overflow-wrap:anywhere;">'
             + reason_html
             + "</p>"
         )
+        break
 
     if not entries:
         return ""
@@ -596,11 +527,11 @@ def get_block_html(
     show_missing_date: bool = False,
 ):
     """Build one valid table card; the positional legacy signature is kept."""
-    source_badge = _build_source_badge(source, journal)
+    journal_text = _text_value(journal).strip()
     source_row = (
-        '<tr><td style="padding:4px 16px 6px;">' + source_badge + "</td></tr>"
-        if source_badge
-        else ""
+        '<tr><td style="padding:4px 16px 6px; color:#555; font-style:italic; font-size:12px;">'
+        + escape(journal_text, quote=False) + '</td></tr>'
+        if journal_text else ''
     )
     title_zh_text = _text_value(title_zh).strip()
     title_zh_row = (
@@ -747,3 +678,4 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
 
     content = '<div style="height:16px; line-height:16px;">&nbsp;</div>'.join(parts)
     return framework.replace("__CONTENT__", content)
+

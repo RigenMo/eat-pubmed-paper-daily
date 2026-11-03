@@ -333,7 +333,7 @@ def test_api_response_reaches_the_email_badges_with_correct_provenance(monkeypat
     assert "中科院分区大类（升级版）" in html
     assert "细胞生物学1区/老年医学1区/神经科学1区。" in html
     assert "25.0（2025）" not in html
-    assert 'href="https://www.easyscholar.cc/console/query"' in html
+    assert 'href="https://www.easyscholar.cc/console/query"' not in html
 
 
 def test_live_mode_does_not_silently_fall_back_to_the_old_journal_list(monkeypatch):
@@ -353,3 +353,4 @@ def test_live_mode_requires_a_valid_current_jif_not_an_audited_old_value(monkeyp
     monkeypatch.setattr(journal_metrics.requests, "get", lambda *args, **kwargs: _response(_payload({"sci": "Q1"})))
 
     assert journal_metrics.enrich_journal_metrics([paper], config) == []
+

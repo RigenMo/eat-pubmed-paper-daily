@@ -2,13 +2,23 @@ name: Send emails daily
 on:
   workflow_dispatch:
   schedule:
-    # 06:17 Asia/Shanghai (22:17 UTC); avoid the busy start of the hour.
-    - cron: '17 22 * * *'
+    - cron: '17 22 * * *' # 06:17 Asia/Shanghai
+    - cron: '17 23 * * *' # 07:17 Asia/Shanghai catch-up
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-email-delivery
+  cancel-in-progress: false
 
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      send_outcome: ${{ steps.send.outcome }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -16,10 +26,19 @@ jobs:
           repository: ${{ vars.REPOSITORY }}
           ref: ${{ vars.REF }}
 
+      - name: Check today's delivery
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+
       - name: Setup uv
+        if: steps.guard.outputs.delivered != 'true'
         uses: astral-sh/setup-uv@v7
 
       - name: Run script
+        id: send
+        if: steps.guard.outputs.delivered != 'true'
         env:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
@@ -33,5 +52,54 @@ jobs:
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
-          uv run src/zotero_arxiv_daily/main.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
+          uv run src/zotero_arxiv_daily/main.py executor.send_empty=true llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
+
+  notify-on-failure:
+    needs: calculate-and-send
+    if: >-
+      ${{ !cancelled() && needs.calculate-and-send.result == 'failure' &&
+          needs.calculate-and-send.outputs.send_outcome != 'success' &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.REPOSITORY }}
+          ref: ${{ vars.REF }}
+
+      - name: Check today's delivery
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+
+      - name: Setup uv
+        if: steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Send failure notice
+        if: steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false'
+        env:
+          PYTHONPATH: src
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run --no-project --with hydra-core --with loguru python -c '
+          import os
+          from datetime import datetime, timedelta, timezone
+          from hydra import compose, initialize_config_dir
+          from zotero_arxiv_daily.utils import send_email
+          with initialize_config_dir(version_base=None, config_dir=os.path.abspath("config")):
+              config = compose(config_name="default")
+          today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d")
+          url = "{}/{}/actions/runs/{}".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
+          send_email(config, f"<p>今日文献邮件生成未完成。</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（生成失败）")
+          '
+
 
