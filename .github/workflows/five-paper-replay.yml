@@ -1,0 +1,96 @@
+name: Five paper replay (validation only, no email)
+on:
+  push:
+    branches: [codex/validate-five-cards-20261103]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/download-artifact@v5
+        with:
+          name: five-paper-reports
+          path: replay-input
+          run-id: 41574801774
+          github-token: ${{ github.token }}
+      - name: Generate one card and validate the combined replay
+        env:
+          PYTHONPATH: src
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          test -n "$OPENAI_API_KEY"
+          uv run python - <<'PY'
+          import json
+          import os
+          from collections import Counter
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from hydra import compose, initialize_config_dir
+          from openai import OpenAI
+          from zotero_arxiv_daily.protocol import Paper
+          from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever, _publication_in_window
+
+          # Four reports and their relevance/IF evidence come from the same real preflight.
+          root = Path('replay-input')
+          reports_path = list(root.rglob('reports.json'))
+          audit_path = list(root.rglob('selection-audit.json'))
+          assert len(reports_path) == len(audit_path) == 1
+          reports = json.loads(reports_path[0].read_text(encoding='utf-8'))
+          audit = json.loads(audit_path[0].read_text(encoding='utf-8'))
+          assert len(reports) == 4
+          match = [item for item in audit if '/42776010/' in item.get('url', '') and item.get('related') is True]
+          assert len(match) == 1 and float(match[0]['jif']) >= 10
+
+          with initialize_config_dir(version_base=None, config_dir=os.path.abspath('config')):
+              config = compose(config_name='default', overrides=[
+                  'llm.api.key=${oc.env:OPENAI_API_KEY}',
+                  'llm.api.base_url=https://llm.goaichat.top/v1',
+                  'llm.api.timeout=600', 'llm.api.max_retries=1',
+                  'llm.generation_kwargs.model=kimi-k3',
+                  'llm.generation_kwargs.max_tokens=65536', 'llm.max_input_tokens=1000000',
+              ])
+          retriever = PubMedRetriever(config)
+          records = retriever._fetch_details(['42776010'])
+          assert len(records) == 1 and str(records[0].get('PMID')) == '42776010'
+          paper = retriever.convert_to_paper(records[0])
+          assert paper and paper.journal.casefold() == match[0]['journal'].casefold()
+          client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url, timeout=600, max_retries=1)
+          paper.generate_tldr(client, config.llm)
+          assert paper.reader_status == 'success' and paper.reading_card and paper.abstract_zh
+          reports.append({
+              'title': paper.title, 'url': paper.url, 'journal': paper.journal,
+              'publication_date': paper.publication_date, 'publication_history': paper.publication_history,
+              'journal_metrics': {'jif': match[0]['jif'], 'source': 'run 41574801774 selection audit'},
+              'abstract_zh': paper.abstract_zh, 'reading_card': paper.reading_card,
+              'reader_status': paper.reader_status,
+              'card_characters': len(Paper._format_reading_card(paper.reading_card)),
+          })
+          today = datetime.now(timezone.utc).date()
+          journals = Counter()
+          for report in reports:
+              assert report.get('reader_status') == 'success' and report.get('reading_card') and report.get('abstract_zh')
+              assert float(report['journal_metrics']['jif']) >= 10
+              assert _publication_in_window(report.get('publication_date'), today - timedelta(days=90), today)
+              journals[' '.join(report['journal'].casefold().split())] += 1
+          assert len({report['url'] for report in reports}) == 5 and max(journals.values()) <= 3
+          out = Path('replay-output')
+          out.mkdir()
+          (out / 'reports.json').write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding='utf-8')
+          summary = {'purpose': 'validation replay, not a new daily email', 'mail_sent': False,
+                     'reused_reports_run': 41574801774, 'reused_complete_cards': 4,
+                     'newly_generated_pmid': '42776010', 'complete_cards': 5, 'journals': dict(journals)}
+          (out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(json.dumps(summary, ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: five-paper-validation-replay
+          path: replay-output/
+          if-no-files-found: error
