@@ -27,9 +27,8 @@ jobs:
         env:
           JOB_RESULT: ${{ needs.simulate.result }}
           NOTICE_RESULT: ${{ needs.notice_condition.result }}
-          WORKFLOW_CANCELLED: ${{ cancelled() }}
         run: |
           python3 - <<'PY'
           import os
-          print("TIMEOUT_CONTROL_RESULT", {key: os.environ[key] for key in ("JOB_RESULT", "NOTICE_RESULT", "WORKFLOW_CANCELLED")})
+          print("TIMEOUT_CONTROL_RESULT", {key: os.environ[key] for key in ("JOB_RESULT", "NOTICE_RESULT")})
           PY
