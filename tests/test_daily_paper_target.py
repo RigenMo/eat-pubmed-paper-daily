@@ -53,3 +53,10 @@ def test_shortage_is_disclosed_at_start_of_summary(config, monkeypatch):
     assert executor.run(send_mail=False) == 3
     assert executor.last_papers == papers
     assert rendered[0][1].startswith("3/5") or rendered[0][1].split("今日摘要")[0].find("3/5") >= 0
+
+
+def test_three_from_one_journal_can_complete_a_diverse_five(config, monkeypatch):
+    executor, papers, _ = prepare(config, monkeypatch, ["A", "A", "B", "C", "A", "A", "A"])
+    config.recommendations.max_per_journal = 3
+    assert executor.run(send_mail=False) == 5
+    assert executor.last_papers == papers[:5]

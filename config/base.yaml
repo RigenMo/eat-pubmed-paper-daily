@@ -15,7 +15,7 @@ recommendations:
   verify_limit: 60 # Check more IF-eligible candidates before declaring a shortfall.
   batch_size: 5
   max_papers: 5 # Target five complete cards; disclose a shortfall without weakening eligibility.
-  max_per_journal: 2
+  max_per_journal: 3 # Keep the five-paper digest spread across multiple journals.
   require_cards: true # Do not send an email full of failed reading cards.
 
 source:
