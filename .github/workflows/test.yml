@@ -21,4 +21,7 @@ jobs:
             const response = await github.rest.actions.getWorkflow(target);
             if (response.data.state !== 'active') throw new Error('Daily sender is not enabled');
             core.info('DAILY_WORKFLOW_ENABLED: active');
-            core.info('This maintenance step does not send email.');
+            if (context.eventName === 'push' && process.env.GITHUB_RUN_ATTEMPT === '1' && context.payload.head_commit.message.includes('[send-daily-now]')) {
+              await github.rest.actions.createWorkflowDispatch({ ...target, ref: 'main' });
+              core.info('DAILY_DISPATCH_REQUESTED: main workflow dispatched once.');
+            }
