@@ -1,0 +1,35 @@
+name: Timeout notice control test (no SMTP)
+on:
+  push:
+    branches:
+      - codex/validate-timeout-notice-20261103
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Deliberately exceed this test job's time limit
+        run: sleep 90
+  notice_condition:
+    needs: simulate
+    if: ${{ !cancelled() && needs.simulate.result == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo WOULD_NOTIFY_WITHOUT_SENDING_EMAIL
+  observe:
+    needs: [simulate, notice_condition]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record timeout routing only
+        env:
+          JOB_RESULT: ${{ needs.simulate.result }}
+          NOTICE_RESULT: ${{ needs.notice_condition.result }}
+          WORKFLOW_CANCELLED: ${{ cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import os
+          print("TIMEOUT_CONTROL_RESULT", {key: os.environ[key] for key in ("JOB_RESULT", "NOTICE_RESULT", "WORKFLOW_CANCELLED")})
+          PY
