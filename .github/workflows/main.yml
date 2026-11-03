@@ -56,8 +56,11 @@ jobs:
 
   notify-on-failure:
     needs: calculate-and-send
+    # A job timeout can be cancelled without the user cancelling the workflow.
     if: >-
-      ${{ !cancelled() && needs.calculate-and-send.result == 'failure' &&
+      ${{ !cancelled() &&
+          (needs.calculate-and-send.result == 'failure' ||
+           needs.calculate-and-send.result == 'cancelled') &&
           needs.calculate-and-send.outputs.send_outcome != 'success' &&
           (github.event_name == 'workflow_dispatch' ||
            (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')) }}
@@ -101,5 +104,3 @@ jobs:
           url = "{}/{}/actions/runs/{}".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
           send_email(config, f"<p>今日文献邮件生成未完成。</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（生成失败）")
           '
-
-
