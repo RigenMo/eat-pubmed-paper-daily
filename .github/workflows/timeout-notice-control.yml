@@ -14,7 +14,7 @@ jobs:
         run: sleep 90
   notice_condition:
     needs: simulate
-    if: ${{ !cancelled() && needs.simulate.result == 'failure' }}
+    if: ${{ !cancelled() && (needs.simulate.result == 'failure' || needs.simulate.result == 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
       - run: echo WOULD_NOTIFY_WITHOUT_SENDING_EMAIL
@@ -32,3 +32,9 @@ jobs:
           import os
           print("TIMEOUT_CONTROL_RESULT", {key: os.environ[key] for key in ("JOB_RESULT", "NOTICE_RESULT")})
           PY
+      - name: Observe workflow cancellation flag
+        if: cancelled()
+        run: echo WORKFLOW_CANCELLED_FLAG_TRUE
+      - name: Observe active workflow flag
+        if: ${{ !cancelled() }}
+        run: echo WORKFLOW_CANCELLED_FLAG_FALSE
