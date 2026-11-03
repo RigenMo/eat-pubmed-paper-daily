@@ -100,6 +100,8 @@ class Paper:
     recommendation_matches: Optional[list[dict[str, Any]]] = None
 
     def _translate_title_with_llm(self, openai_client: OpenAI, llm_params: dict) -> str:
+        title_kwargs = dict(llm_params.get("generation_kwargs", {}))
+        title_kwargs["timeout"] = min(float(llm_params.get("api", {}).get("timeout", 600)), 60)
         response = openai_client.chat.completions.create(
             messages=[
                 {
@@ -112,7 +114,7 @@ class Paper:
                 },
                 {"role": "user", "content": self.title},
             ],
-            **llm_params.get('generation_kwargs', {})
+            **title_kwargs
         )
         return response.choices[0].message.content.strip()
 
