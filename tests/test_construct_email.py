@@ -188,11 +188,13 @@ def test_render_email_shows_verified_journal_metric_badges_and_safe_source():
 
     html = render_email([paper])
 
-    assert "期刊指标" in html
+    assert "Nature Aging" in html
+    assert ">PubMed</span>" not in html
+    assert "期刊指标" not in html
     assert "JIF(影响因子)：25.0（2025）" in html
     assert "JCR" in html and "Geriatrics &amp; Gerontology" in html and "Q1" in html
     assert "中科院分区大类" in html and "中科院分区小类" in html
-    assert 'href="https://www.nature.com/nataging/journal-impact"' in html
+    assert 'href="https://www.nature.com/nataging/journal-impact"' not in html
     assert "原文链接" in html
     assert ">PDF<" not in html
 
@@ -301,7 +303,7 @@ def test_render_email_always_shows_unverified_metric_badges_without_journal():
     assert "JCR分区" in html
     assert "中科院分区大类" in html
     assert "中科院分区小类" in html
-    assert html.count("来源未核实") >= 4
+    assert "来源未核实" not in html
     assert "未提供" in html
     assert "年份未核实" not in html
     assert "年份未提供" not in html
@@ -380,7 +382,7 @@ def test_render_email_shows_actual_publication_history_and_ignores_pubmed_index_
     for label in ("投稿", "修回", "接收", "在线发表", "卷期发表"):
         assert label in html
     assert "2026-11-02" not in html
-    assert 'href="https://publisher.example/history"' in html
+    assert 'href="https://publisher.example/history"' not in html
     assert 'href="https://pubmed.example/index"' not in html
     assert html.index("投稿") < html.index("修回") < html.index("接收") < html.index("在线发表") < html.index("卷期发表")
     assert html.index("首次发表/发表日期") < html.index("一、原文摘要中文版")
@@ -405,8 +407,8 @@ def test_render_email_shows_zotero_reason_and_safe_source_title_without_raw_matc
 
     assert "与 Zotero 的关系" in html
     assert "同一研究问题和人群定义，可作为直接比较依据。" in html
-    assert "Zotero anchor title" in html
-    assert 'href="https://zotero.example/item/1?x=1&amp;y=2"' in html
+    assert "Zotero anchor title" not in html
+    assert 'href="https://zotero.example/item/1?x=1&amp;y=2"' not in html
     for hidden in ("candidate quote must stay hidden", "anchor quote must stay hidden", "secret-raw-key", "secret abstract must stay hidden", "0.91"):
         assert hidden not in html
     assert "Relevance" not in html
@@ -437,3 +439,4 @@ def test_render_email_reports_missing_publication_date_once():
     assert html.count("发表日期未提供") == 1
     assert "年份未提供" not in html
     assert "年份未核实" not in html
+
