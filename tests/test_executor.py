@@ -389,7 +389,36 @@ def test_generate_email_summary_uses_configured_character_pool(config):
 
     summary = executor.generate_email_summary([make_sample_paper()])
 
-    assert summary.endswith("—— 测试角色 如是说")
+    assert summary.endswith("——测试角色")
+
+
+@pytest.mark.parametrize("name", ["吕布（《王者荣耀》）", "吕布(王者荣耀)", "吕布"])
+def test_character_signoff_has_only_the_character_name(config, name):
+    from types import SimpleNamespace
+    from tests.canned_responses import make_sample_paper
+
+    config.executor.character_pool = [{"name": name, "prompt": "角色语气"}]
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="只依据证据阅读。\n——吕布（《王者荣耀》）如是说")
+        )])
+    )))
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    executor.openai_client = client
+    summary = executor.generate_email_summary([make_sample_paper()])
+    assert summary == "只依据证据阅读。\n\n——吕布"
+
+
+def test_automatic_pubmed_pool_is_not_capped_by_delivery_count(config, monkeypatch):
+    config.search.mode = 5
+    config.source.mix_mode = 1
+    config.source.pubmed.max_results = 400
+    config.executor.max_paper_num = 100
+    config.recommendations.enabled = True
+    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", lambda **kwargs: object())
+    executor = Executor(config)
+    assert executor.retrievers["pubmed"]._max_results == 400
 
 
 def test_executor_rejects_empty_source_list(config):
@@ -551,4 +580,3 @@ def test_related_if_eligible_papers_prioritize_publication_date(config, monkeypa
     assert executor.run(send_mail=False) == 2
     assert checked == [newer, older]
     assert executor.last_papers == [newer, older]
-
