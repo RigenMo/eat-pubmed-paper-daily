@@ -430,7 +430,7 @@ class Executor:
             selected = []
             attempted = []
             journal_counts = {}
-            per_journal = int(recommendation_config.get("max_per_journal", 2))
+            per_journal = int(recommendation_config.get("max_per_journal", 3))
             require_cards = bool(recommendation_config.get("require_cards", False))
             self.last_papers = attempted
             for p in tqdm(reranked_papers):
