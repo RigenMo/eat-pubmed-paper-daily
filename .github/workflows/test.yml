@@ -3,25 +3,25 @@ on:
   push:
     branches:
       - codex/restore-daily-delivery-20261103
-  workflow_dispatch:
 permissions:
   contents: read
-  actions: write
+  actions: read
 jobs:
-  restore-daily:
+  verify-delivery-dedup:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Explicitly enable and inspect the daily sender
-        uses: actions/github-script@v8
+      - uses: actions/checkout@v6
         with:
-          script: |
-            const target = { owner: context.repo.owner, repo: context.repo.repo, workflow_id: 'main.yml' };
-            await github.rest.actions.enableWorkflow(target);
-            const response = await github.rest.actions.getWorkflow(target);
-            if (response.data.state !== 'active') throw new Error('Daily sender is not enabled');
-            core.info('DAILY_WORKFLOW_ENABLED: active');
-            if (context.eventName === 'push' && process.env.GITHUB_RUN_ATTEMPT === '1' && context.payload.head_commit.message.includes('[send-daily-now]')) {
-              await github.rest.actions.createWorkflowDispatch({ ...target, ref: 'main' });
-              core.info('DAILY_DISPATCH_REQUESTED: main workflow dispatched once.');
-            }
+          ref: main
+      - name: Read actual China-date delivery state
+        id: delivery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Verify today's real submission is recognised
+        env:
+          DELIVERED: ${{ steps.delivery.outputs.delivered }}
+        run: |
+          test "$DELIVERED" = "true"
+          echo DEDUP_CHECK_PASSED_NO_SECOND_EMAIL
