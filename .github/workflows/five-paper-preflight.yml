@@ -1,0 +1,40 @@
+name: Five-paper preflight (no email)
+on:
+  push:
+    branches:
+      - codex/five-paper-live-preflight-20261103
+permissions:
+  contents: read
+jobs:
+  verify-five:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Generate five real reports without SMTP
+        env:
+          PREFLIGHT_MODE: automatic
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          OPENAI_API_BASE: https://llm.goaichat.top/v1
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run python scripts/preflight_digest.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 search.mode=5 source.mix_mode=1 recommendations.max_papers=5 recommendations.publication_days=90 recommendations.candidate_limit=400 recommendations.verify_limit=60 source.pubmed.max_results=400 executor.send_empty=true email.sender=preflight@example.invalid email.receiver=preflight@example.invalid email.smtp_server=localhost email.smtp_port=1 email.sender_password=unused
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          reports = json.loads(Path('outputs/preflight/automatic/reports.json').read_text(encoding='utf-8'))
+          assert len(reports) == 5 and all(p['reading_card'] and p['journal_metrics']['jif'] >= 10 for p in reports), 'Five complete eligible reports were not produced'
+          print('FIVE_PAPER_PREFLIGHT: five complete IF-eligible Zotero-linked reports; no email sent.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: five-paper-reports
+          path: outputs/preflight/automatic/
+          retention-days: 7
+          if-no-files-found: ignore
