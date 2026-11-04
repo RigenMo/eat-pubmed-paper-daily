@@ -8,10 +8,17 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '37 0 * * *' # 08:37 Asia/Shanghai
+    - cron: '37 0-15 * * *' # Hourly, 08:37-23:37 Asia/Shanghai.
+  workflow_run:
+    workflows: ['Send emails daily']
+    types: [completed]
 
 jobs:
   check-daily:
+    if: >-
+      ${{ github.event_name != 'workflow_run' ||
+          (github.event.workflow_run.head_repository.full_name == github.repository &&
+           github.event.workflow_run.head_branch == github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -37,13 +44,19 @@ jobs:
         uses: actions/github-script@v8
         env:
           DELIVERED: ${{ steps.guard.outputs.delivered }}
-          RECOVERY_ALLOWED: ${{ github.event_name == 'schedule' || inputs.recover == true }}
+          EVENT_NAME: ${{ github.event_name }}
+          RECOVER: ${{ inputs.recover }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const workflow_id = 'main.yml';
+            const hour = new Date(Date.now() + 8 * 3600000).getUTCHours();
+            const allowed = (process.env.EVENT_NAME === 'schedule' && hour >= 8) ||
+              (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.RECOVER === 'true') ||
+              (process.env.EVENT_NAME === 'workflow_run' && ['failure', 'cancelled'].includes(process.env.RUN_CONCLUSION));
             const workflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id });
-            if (workflow.data.state !== 'active' && process.env.RECOVERY_ALLOWED !== 'true') {
+            if (workflow.data.state !== 'active' && !allowed) {
               core.info(`Main workflow is disabled: ${workflow.data.state}; manual check only.`);
             } else if (workflow.data.state !== 'active') {
               core.info(`Enabling main workflow, previous state: ${workflow.data.state}`);
@@ -87,8 +100,8 @@ jobs:
                 }
               }
             }
-            if (process.env.RECOVERY_ALLOWED !== 'true') {
-              core.info('Manual check only; recovery was not requested.');
+            if (!allowed) {
+              core.info('Read-only check; this event does not request recovery.');
               return;
             }
             const repository = await github.rest.repos.get({ owner, repo });
@@ -107,6 +120,56 @@ jobs:
             });
             core.info('Requested one recovery run of main.yml.');
 
+  notify-on-failure:
+    needs: check-daily
+    if: ${{ !cancelled() && (needs.check-daily.result == 'failure' || needs.check-daily.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: daily-email-notice
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Check delivery and prior notices
+        id: guard
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Setup uv
+        if: steps.guard.outcome != 'success' || steps.guard.outputs.notified == 'false'
+        uses: astral-sh/setup-uv@v7
+      - name: Send supervisor failure notice
+        if: steps.guard.outcome != 'success' || steps.guard.outputs.notified == 'false'
+        env:
+          PYTHONPATH: src
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          if [ "$GUARD_OUTCOME" != success ]; then echo "Could not verify delivery or prior notices; sending notice without deduplication."; fi
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run --no-project --with hydra-core --with loguru python -c '
+          import os
+          from datetime import datetime, timedelta, timezone
+          from hydra import compose, initialize_config_dir
+          from zotero_arxiv_daily.utils import send_email
+          with initialize_config_dir(version_base=None, config_dir=os.path.abspath("config")):
+              config = compose(config_name="default")
+          today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d")
+          url = "{}/{}/actions/runs/{}".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
+          detail = "今日投递状态暂无法核实。" if os.environ["GUARD_OUTCOME"] != "success" else "请查看本次运行。"
+          send_email(config, f"<p>文献邮件自动监督出现故障。{detail}</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（监督故障）")
+          '
+
   keep-alive:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -121,7 +184,8 @@ jobs:
       - name: Update keep-alive file
         run: |
           day=$(date -u +%d)
-          if [ "$day" != 01 ] && [ "$day" != 15 ]; then
+          hour=$(date -u +%H)
+          if { [ "$day" != 01 ] && [ "$day" != 15 ]; } || [ "$hour" != 00 ]; then
             echo "No keep-alive update due today."
             exit 0
           fi
@@ -132,7 +196,8 @@ jobs:
       - name: Commit and push if changed
         run: |
           day=$(date -u +%d)
-          if [ "$day" != 01 ] && [ "$day" != 15 ]; then exit 0; fi
+          hour=$(date -u +%H)
+          if { [ "$day" != 01 ] && [ "$day" != 15 ]; } || [ "$hour" != 00 ]; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .github/keep-alive.txt

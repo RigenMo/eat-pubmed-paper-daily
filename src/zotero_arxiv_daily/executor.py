@@ -1,6 +1,10 @@
 import json
+import os
 import random
 import re as _re
+import tempfile
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
 from pyzotero import zotero
@@ -9,7 +13,7 @@ from .utils import glob_match
 from .retriever import get_retriever_cls
 from .retriever.pubmed_retriever import PubMedRetriever
 from .protocol import CorpusPaper
-from datetime import datetime
+from datetime import datetime, timezone
 from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .journal_metrics import enrich_journal_metrics
@@ -478,4 +482,35 @@ class Executor:
         logger.info("Sending email...")
         send_email(self.config, email_content)
         logger.info(f"Email sent successfully ({len(reranked_papers)} papers)")
+        # SMTP has already accepted the message. A receipt failure must never
+        # turn that successful send into a retryable SMTP failure.
+        try:
+            confirmed_at = datetime.now(timezone.utc)
+            expected = int(recommendation_config.get("max_papers", 5))
+            complete = sum(bool(p.reading_card) and bool(p.abstract_zh) for p in reranked_papers)
+            receipt = {
+                "schema_version": 1,
+                "run_id": os.environ.get("GITHUB_RUN_ID"),
+                "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+                "date": confirmed_at.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+                "recorded_at_utc": confirmed_at.isoformat(),
+                "mail_sent": True,
+                "paper_count": len(reranked_papers),
+                "complete_cards": complete,
+                "expected_cards": expected,
+                "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),
+                "papers": [
+                    {"url": p.url, "journal": p.journal, "publication_date": p.publication_date,
+                     "jif": (p.journal_metrics or {}).get("jif")}
+                    for p in reranked_papers
+                ],
+            }
+            output = Path("outputs/delivery-receipt.json")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, delete=False) as temp:
+                temp_path = temp.name
+                json.dump(receipt, temp, ensure_ascii=False, indent=2)
+            os.replace(temp_path, output)
+        except Exception:
+            logger.exception("SMTP succeeded but writing the delivery receipt failed")
         return len(reranked_papers)
