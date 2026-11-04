@@ -91,6 +91,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  supervise-delivery:
+    needs: [calculate-and-send, notify-on-failure]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Start the automatic delivery supervisor
+        uses: actions/github-script@v8
+        env:
+          SENDER_RESULT: ${{ needs.calculate-and-send.result }}
+        with:
+          script: |
+            const failed = ['failure', 'cancelled'].includes(process.env.SENDER_RESULT);
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'keep-alive.yml', ref: 'main',
+              inputs: {recover: String(failed), sender_run_id: String(context.runId)}
+            });
+            core.info('Automatic supervision requested for sender run ' + context.runId + '; recover=' + failed);
+
   notify-on-failure:
     needs: calculate-and-send
     concurrency:
@@ -102,9 +124,7 @@ jobs:
           (needs.calculate-and-send.outputs.quality_passed == 'false' ||
            ((needs.calculate-and-send.result == 'failure' ||
              needs.calculate-and-send.result == 'cancelled') &&
-            needs.calculate-and-send.outputs.send_outcome != 'success' &&
-            (github.event_name == 'workflow_dispatch' ||
-             (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')))) }}
+            needs.calculate-and-send.outputs.send_outcome != 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
