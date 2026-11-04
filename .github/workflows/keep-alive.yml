@@ -12,6 +12,7 @@ on:
         type: string
         default: ''
   schedule:
+    - cron: '10 22 * * *' # 06:10 Asia/Shanghai morning recovery check.
     - cron: '37 0-15 * * *' # Hourly, 08:37-23:37 Asia/Shanghai.
   workflow_run:
     workflows: ['Send emails daily']
@@ -57,8 +58,10 @@ jobs:
             const { owner, repo } = context.repo;
             if (process.env.SOURCE_RUN_ID) core.info('Automatic sender handoff: ' + process.env.SOURCE_RUN_ID);
             const workflow_id = 'main.yml';
-            const hour = new Date(Date.now() + 8 * 3600000).getUTCHours();
-            const allowed = (process.env.EVENT_NAME === 'schedule' && hour >= 8) ||
+            const localTime = new Date(Date.now() + 8 * 3600000);
+            const hour = localTime.getUTCHours();
+            const morningCheckDue = hour > 6 || (hour === 6 && localTime.getUTCMinutes() >= 10);
+            const allowed = (process.env.EVENT_NAME === 'schedule' && morningCheckDue) ||
               (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.RECOVER === 'true') ||
               (process.env.EVENT_NAME === 'workflow_run' && ['failure', 'cancelled'].includes(process.env.RUN_CONCLUSION));
             const workflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id });

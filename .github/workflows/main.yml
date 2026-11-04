@@ -2,8 +2,8 @@ name: Send emails daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 22 * * *' # 06:17 Asia/Shanghai
-    - cron: '17 23 * * *' # 07:17 Asia/Shanghai catch-up
+    - cron: '30 21 * * *' # 05:30 Asia/Shanghai
+    - cron: '5 22 * * *' # 06:05 Asia/Shanghai catch-up
 
 permissions:
   contents: read
