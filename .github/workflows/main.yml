@@ -19,6 +19,10 @@ jobs:
     timeout-minutes: 45
     outputs:
       send_outcome: ${{ steps.send.outcome }}
+      quality_passed: ${{ steps.receipt.outputs.quality_passed }}
+      complete_cards: ${{ steps.receipt.outputs.complete_cards }}
+      expected_cards: ${{ steps.receipt.outputs.expected_cards }}
+      receipt_reason: ${{ steps.receipt.outputs.reason }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -54,16 +58,53 @@ jobs:
           test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
           uv run src/zotero_arxiv_daily/main.py executor.send_empty=true llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.max_papers=5 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=400 recommendations.verify_limit=60 source.pubmed.max_results=400 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
 
+      - name: Read delivery receipt
+        id: receipt
+        if: always()
+        env:
+          SEND_OUTCOME: ${{ steps.send.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path('outputs/delivery-receipt.json')
+          fields = {}
+          if path.exists():
+              receipt = json.loads(path.read_text(encoding='utf-8'))
+              fields = {key: receipt[key] for key in ('quality_passed', 'complete_cards', 'expected_cards')}
+              fields['reason'] = 'content_shortfall' if not receipt['quality_passed'] else ''
+          elif os.environ['SEND_OUTCOME'] == 'success':
+              fields = {'quality_passed': False, 'complete_cards': 'unknown', 'expected_cards': 5, 'reason': 'missing_receipt'}
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              for key, value in fields.items():
+                  output.write(f'{key}={str(value).lower() if isinstance(value, bool) else value}\n')
+          print('Delivery quality:', fields)
+          PY
+
+      - name: Upload delivery receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-delivery-receipt-${{ github.run_attempt }}
+          path: outputs/delivery-receipt.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   notify-on-failure:
     needs: calculate-and-send
+    concurrency:
+      group: daily-email-notice
+      cancel-in-progress: false
     # A job timeout can be cancelled without the user cancelling the workflow.
     if: >-
       ${{ !cancelled() &&
-          (needs.calculate-and-send.result == 'failure' ||
-           needs.calculate-and-send.result == 'cancelled') &&
-          needs.calculate-and-send.outputs.send_outcome != 'success' &&
-          (github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')) }}
+          (needs.calculate-and-send.outputs.quality_passed == 'false' ||
+           ((needs.calculate-and-send.result == 'failure' ||
+             needs.calculate-and-send.result == 'cancelled') &&
+            needs.calculate-and-send.outputs.send_outcome != 'success' &&
+            (github.event_name == 'workflow_dispatch' ||
+             (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -75,18 +116,23 @@ jobs:
 
       - name: Check today's delivery
         id: guard
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/daily_delivery_guard.py
 
       - name: Setup uv
-        if: steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false'
+        if: steps.guard.outcome != 'success' || (steps.guard.outputs.notified == 'false' && (steps.guard.outputs.delivered == 'false' || needs.calculate-and-send.outputs.quality_passed == 'false'))
         uses: astral-sh/setup-uv@v7
 
       - name: Send failure notice
-        if: steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false'
+        if: steps.guard.outcome != 'success' || (steps.guard.outputs.notified == 'false' && (steps.guard.outputs.delivered == 'false' || needs.calculate-and-send.outputs.quality_passed == 'false'))
         env:
           PYTHONPATH: src
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          RECEIPT_REASON: ${{ needs.calculate-and-send.outputs.receipt_reason }}
+          COMPLETE_CARDS: ${{ needs.calculate-and-send.outputs.complete_cards }}
+          EXPECTED_CARDS: ${{ needs.calculate-and-send.outputs.expected_cards }}
           SENDER: ${{ secrets.SENDER }}
           RECEIVER: ${{ secrets.RECEIVER }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
@@ -102,5 +148,14 @@ jobs:
               config = compose(config_name="default")
           today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d")
           url = "{}/{}/actions/runs/{}".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
-          send_email(config, f"<p>今日文献邮件生成未完成。</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（生成失败）")
+          reason = os.environ["RECEIPT_REASON"]
+          if reason == "content_shortfall":
+              detail = "今日日报仅有{}/{}篇完整精读，未达到目标。".format(os.environ["COMPLETE_CARDS"], os.environ["EXPECTED_CARDS"])
+          elif reason == "missing_receipt":
+              detail = "发件任务已结束，但缺少投递回执，内容是否达标暂无法核实。"
+          elif os.environ["GUARD_OUTCOME"] != "success":
+              detail = "今日日报任务失败，投递状态暂无法核实。"
+          else:
+              detail = "今日文献邮件生成未完成。"
+          send_email(config, f"<p>{detail}</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（日报异常）")
           '
