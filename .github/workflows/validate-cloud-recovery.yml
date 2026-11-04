@@ -1,0 +1,102 @@
+name: Validate cloud recovery (read only)
+on:
+  push:
+    branches: [codex/validate-cloud-watchdog-20261104]
+
+jobs:
+  check-daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: daily-email-recovery
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Check delivery
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+
+      - name: Prepare recovery
+        id: prepare
+        uses: actions/github-script@v8
+        env:
+          DELIVERED: ${{ steps.guard.outputs.delivered }}
+          RECOVERY_ALLOWED: 'false'
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const workflow_id = 'main.yml';
+            const workflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id });
+            if (workflow.data.state !== 'active' && process.env.RECOVERY_ALLOWED !== 'true') {
+              core.info(`Main workflow is disabled: ${workflow.data.state}; manual check only.`);
+            } else if (workflow.data.state !== 'active') {
+              core.info(`Enabling main workflow, previous state: ${workflow.data.state}`);
+              await github.rest.actions.enableWorkflow({ owner, repo, workflow_id });
+              const updated = await github.rest.actions.getWorkflow({ owner, repo, workflow_id });
+              if (updated.data.state !== 'active') throw new Error('Main workflow is still disabled');
+            }
+            core.setOutput('needs_dispatch', 'false');
+            if (process.env.DELIVERED === 'true') {
+              core.info('Email already delivered today.');
+              return;
+            }
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id, per_page: 100
+            });
+            if (runs.some(run => run.status !== 'completed')) {
+              core.info('A main workflow run is still active or queued.');
+              return;
+            }
+            const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+            const priorRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id: 'keep-alive.yml', status: 'completed', per_page: 100,
+              created: `>=${new Date(Date.now() - 2 * 86400000).toISOString()}`
+            });
+            for (const run of priorRuns) {
+              if (run.id === context.runId) continue;
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, filter: 'all', per_page: 100
+              });
+              for (const job of jobs) {
+                for (const step of job.steps || []) {
+                  if (step.name !== 'Dispatch missing daily email' || step.conclusion !== 'success') continue;
+                  if (!step.completed_at || Number.isNaN(Date.parse(step.completed_at))) {
+                    throw new Error('Successful dispatch has no valid completion time');
+                  }
+                  const dispatchDay = new Date(Date.parse(step.completed_at) + 8 * 3600000).toISOString().slice(0, 10);
+                  if (dispatchDay === today) {
+                    core.info('A recovery dispatch already succeeded today.');
+                    return;
+                  }
+                }
+              }
+            }
+            if (process.env.RECOVERY_ALLOWED !== 'true') {
+              core.info('Manual check only; recovery was not requested.');
+              return;
+            }
+            const repository = await github.rest.repos.get({ owner, repo });
+            core.setOutput('ref', repository.data.default_branch);
+            core.setOutput('needs_dispatch', 'true');
+
+      - name: Dispatch missing daily email
+        if: steps.prepare.outputs.needs_dispatch == 'true'
+        uses: actions/github-script@v8
+        env:
+          TARGET_REF: ${{ steps.prepare.outputs.ref }}
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'main.yml', ref: process.env.TARGET_REF
+            });
+            core.info('Requested one recovery run of main.yml.');
+
