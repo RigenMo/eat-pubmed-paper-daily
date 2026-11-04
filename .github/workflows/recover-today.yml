@@ -1,0 +1,43 @@
+name: Restore today's daily delivery
+on:
+  push:
+    branches: [codex/recover-daily-delivery-20261104]
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: daily-email-recovery
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Check actual delivery today
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Restore and dispatch at most once
+        if: steps.guard.outputs.delivered != 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const workflow_id = 'main.yml';
+            const workflow = (await github.rest.actions.getWorkflow({owner, repo, workflow_id})).data;
+            core.info('Workflow state before recovery: ' + workflow.state);
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {owner, repo, workflow_id, per_page: 100, created: '>=2026-11-03T16:00:00Z'});
+            const active = runs.filter(run => run.status !== 'completed');
+            if (active.length) {
+              core.info('EXISTING_SENDER ' + JSON.stringify(active.map(run => ({id: run.id, status: run.status, url: run.html_url}))));
+              return;
+            }
+            if (workflow.state !== 'active') {
+              await github.rest.actions.enableWorkflow({owner, repo, workflow_id});
+            }
+            await github.rest.actions.createWorkflowDispatch({owner, repo, workflow_id, ref: 'main'});
+            core.info('RECOVERY_DISPATCHED main.yml ref=main exactly once; no direct SMTP access in this helper.');
