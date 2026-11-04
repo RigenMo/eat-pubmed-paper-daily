@@ -124,9 +124,7 @@ jobs:
           (needs.calculate-and-send.outputs.quality_passed == 'false' ||
            ((needs.calculate-and-send.result == 'failure' ||
              needs.calculate-and-send.result == 'cancelled') &&
-            needs.calculate-and-send.outputs.send_outcome != 'success' &&
-            (github.event_name == 'workflow_dispatch' ||
-             (github.event_name == 'schedule' && github.event.schedule == '17 23 * * *')))) }}
+            needs.calculate-and-send.outputs.send_outcome != 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
