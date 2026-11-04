@@ -1,0 +1,31 @@
+name: Verify automatic handoff without another email
+on:
+  push:
+    branches: [codex/validate-automatic-handoff-20261104]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  verify-handoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Require existing accepted delivery
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Assert no new email is needed
+        env:
+          DELIVERED: ${{ steps.guard.outputs.delivered }}
+        run: test "$DELIVERED" = true
+      - name: Exercise the guarded sender and its automatic completion observer
+        if: steps.guard.outputs.delivered == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({...context.repo, workflow_id: 'main.yml', ref: 'main'});
+            core.info('Guarded main run requested only after confirming today already delivered. Sender must skip SMTP; its completion should trigger the cloud observer automatically.');
