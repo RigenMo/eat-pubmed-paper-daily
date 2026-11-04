@@ -7,6 +7,10 @@ on:
         description: 'Dispatch the daily email if missing'
         type: boolean
         default: false
+      sender_run_id:
+        description: 'Sender run requesting this automatic check'
+        type: string
+        default: ''
   schedule:
     - cron: '37 0-15 * * *' # Hourly, 08:37-23:37 Asia/Shanghai.
   workflow_run:
@@ -47,9 +51,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           RECOVER: ${{ inputs.recover }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_RUN_ID: ${{ inputs.sender_run_id }}
         with:
           script: |
             const { owner, repo } = context.repo;
+            if (process.env.SOURCE_RUN_ID) core.info('Automatic sender handoff: ' + process.env.SOURCE_RUN_ID);
             const workflow_id = 'main.yml';
             const hour = new Date(Date.now() + 8 * 3600000).getUTCHours();
             const allowed = (process.env.EVENT_NAME === 'schedule' && hour >= 8) ||

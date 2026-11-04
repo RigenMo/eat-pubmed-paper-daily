@@ -91,6 +91,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  supervise-delivery:
+    needs: [calculate-and-send, notify-on-failure]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Start the automatic delivery supervisor
+        uses: actions/github-script@v8
+        env:
+          SENDER_RESULT: ${{ needs.calculate-and-send.result }}
+        with:
+          script: |
+            const failed = ['failure', 'cancelled'].includes(process.env.SENDER_RESULT);
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'keep-alive.yml', ref: 'main',
+              inputs: {recover: String(failed), sender_run_id: String(context.runId)}
+            });
+            core.info('Automatic supervision requested for sender run ' + context.runId + '; recover=' + failed);
+
   notify-on-failure:
     needs: calculate-and-send
     concurrency:
