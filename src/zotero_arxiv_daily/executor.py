@@ -243,7 +243,7 @@ class Executor:
 
     def filter_corpus(self, corpus: list[CorpusPaper]) -> list[CorpusPaper]:
         if self.include_path_patterns:
-            logger.info(f"Selecting zotero papers matching include_path: {self.include_path_patterns}")
+            logger.info("Applying Zotero collection inclusion rules")
             corpus = [
                 c for c in corpus
                 if any(
@@ -253,7 +253,7 @@ class Executor:
                 )
             ]
         if self.ignore_path_patterns:
-            logger.info(f"Excluding zotero papers matching ignore_path: {self.ignore_path_patterns}")
+            logger.info("Applying Zotero collection exclusion rules")
             corpus = [
                 c for c in corpus
                 if not any(
