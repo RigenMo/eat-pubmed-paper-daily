@@ -524,7 +524,7 @@ def _build_innovation_html(assessment: Any) -> str:
     )
     reason = _text_value(assessment.get("reason")).strip()
     reason_html = f'<div style="margin-top:4px; color:#555555; font-size:13px;">摘要判读：{escape(reason)}</div>' if reason else ""
-    return f'<tr><td style="padding:2px 16px 6px; line-height:1.5;">{badges}{reason_html}</td></tr>'
+    return f'<tr><td style="padding:2px 16px 6px; line-height:1.5; overflow-wrap:anywhere; word-break:break-word;">{badges}{reason_html}</td></tr>'
 
 
 def get_block_html(

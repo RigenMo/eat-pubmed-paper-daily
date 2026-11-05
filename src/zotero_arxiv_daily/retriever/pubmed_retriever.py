@@ -104,7 +104,7 @@ def _ncbi_get(url: str, params: dict[str, Any], retries: int = 5) -> requests.Re
         except Exception as exc:
             if attempt == retries - 1:
                 raise
-            logger.warning(f"NCBI request failed ({exc}), retry {attempt + 1}/{retries}")
+            logger.warning(f"NCBI request failed, retry {attempt + 1}/{retries}")
             sleep(10)
 
 
@@ -700,9 +700,22 @@ class PubMedRetriever(BaseRetriever):
             rounds = []
             selected = []
             unique_count = 0
+            last_server_error = None
+            self.retrieval_audit = {
+                "rounds": rounds,
+                "unique_count": 0,
+                "after_date_filter_count": 0,
+                "requested_id_budget": budget,
+                "requested_ids": 0,
+                "round_limit_reached": False,
+                "budget_exhausted": False,
+                "failed_queries": [],
+                "successful_queries": 0,
+            }
 
             for round_index in range(3):
                 round_calls = []
+                rounds.append(round_calls)
                 candidates = eligible
                 if round_index:
                     # A deeper prefix repeats earlier IDs, so spend the remaining
@@ -719,16 +732,30 @@ class PubMedRetriever(BaseRetriever):
                     if limit <= limits[index] or limit <= 0:
                         continue
                     query = f"({self._pubmed_queries[index]}) AND {date_filter}"
-                    result = self._fetch_pmids_with_limit(query, limit)
-                    used += limit  # Count full requested prefixes, including repeats.
+                    used += limit  # Count full requested prefixes, including failures and repeats.
+                    self.retrieval_audit["requested_ids"] = used
+                    try:
+                        result = self._fetch_pmids_with_limit(query, limit)
+                    except requests.HTTPError as exc:
+                        status = exc.response.status_code if exc.response is not None else None
+                        if status is None or not 500 <= status <= 599:
+                            raise
+                        last_server_error = exc
+                        self.retrieval_audit["failed_queries"].append({"query_index": index + 1, "http_status": status})
+                        round_calls.append({"query_index": index + 1, "requested": limit, "returned": 0})
+                        logger.warning(f"PubMed theme {index + 1} returned HTTP {status} after retries")
+                        continue
+                    self.retrieval_audit["successful_queries"] += 1
                     limits[index] = limit
                     query_results[index] = result
                     round_calls.append({"query_index": index + 1, "requested": limit, "returned": len(result)})
                     if len(result) >= limit:
                         next_eligible.append(index)
                 if not round_calls:
+                    rounds.pop()
                     break
-                rounds.append(round_calls)
+                if not self.retrieval_audit["successful_queries"] and last_server_error is not None:
+                    raise last_server_error
 
                 # Interleave the prefixes before fetching only unseen records.
                 ordered = []
@@ -741,6 +768,7 @@ class PubMedRetriever(BaseRetriever):
                                 seen.add(pmid)
                                 ordered.append(pmid)
                 unique_count = len(ordered)
+                self.retrieval_audit["unique_count"] = unique_count
                 new_ids = [pmid for pmid in ordered if pmid not in queried_ids]
                 if new_ids:
                     for record in _recent_results(new_ids):
@@ -748,11 +776,12 @@ class PubMedRetriever(BaseRetriever):
                             records_by_id[str(record["PMID"])] = record
                     queried_ids.update(new_ids)
                 selected = [records_by_id[pmid] for pmid in ordered if pmid in records_by_id]
+                self.retrieval_audit["after_date_filter_count"] = len(selected)
                 if len(selected) >= self._max_results or not next_eligible:
                     break
                 eligible = next_eligible
 
-            self.retrieval_audit = {
+            self.retrieval_audit.update({
                 "rounds": rounds,
                 "unique_count": unique_count,
                 "after_date_filter_count": len(selected),
@@ -762,7 +791,7 @@ class PubMedRetriever(BaseRetriever):
                 "budget_exhausted": len(selected) < self._max_results and bool(next_eligible) and (
                     used >= budget or all(budget - used <= limits[index] for index in next_eligible)
                 ),
-            }
+            })
             logger.info(f"PubMed bounded theme retrieval: {len(rounds)} round(s), {used}/{budget} requested IDs")
             return selected[:self._max_results]
 

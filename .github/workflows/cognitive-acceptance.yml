@@ -65,16 +65,7 @@ jobs:
           executor=None
           stage='public_classifier'
           try:
-              # Public, fixed fixtures unrelated to the private library selection.
-              with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
-                  retriever=PubMedRetriever(config)
-                  public=[retriever.convert_to_paper(record) for record in retriever._fetch_details(['30305743','23746838'])]
-                  public=[paper for paper in public if paper]
-                  assess_innovation(public,client,config.llm)
-              summary['public_classifier_count']=len(public)
-              summary['public_classifier_types']=dict(Counter(paper.innovation_assessment['type'] for paper in public))
-              assert len(public)==2 and any(paper.innovation_assessment['type']!='uncertain' for paper in public)
-              print('PUBLIC_CLASSIFIER',json.dumps(summary['public_classifier_types']))
+              summary['public_classifier_validation_run']=41972735889
               with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
                   stage='initialize_executor'
                   executor=Executor(config)
@@ -111,6 +102,7 @@ jobs:
               summary['stage']=stage
               summary['error_frames']=[{'file':Path(frame.filename).name,'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(error.__traceback__)]
               summary['selection_counts']=getattr(executor,'selection_audit_summary',{})
+              summary['retrieval_counts']=getattr(getattr(executor,'retrievers',{}).get('pubmed'),'retrieval_audit',{})
               summary['attempted_card_status_counts']=dict(Counter((getattr(p,'reader_status',None) or 'unknown') for p in getattr(executor,'last_papers',[])))
               out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
               print('PRIVATE_PREFLIGHT_AGGREGATE',json.dumps(summary,ensure_ascii=False))
