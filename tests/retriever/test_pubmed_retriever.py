@@ -574,3 +574,47 @@ def test_midnight_retrieval_uses_one_shanghai_date_for_query_and_filter(config, 
     assert '"2026/11/05"[PDAT]' in queries[0]
     assert [paper["PMID"] for paper in result] == ["1", "2"]
     assert next(instants).day == 5  # no second clock read during retrieval
+
+def test_theme_backfill_after_duplicates_and_old_dates(config, monkeypatch):
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    calls = []
+    def fetch(self, query, limit):
+        calls.append(limit)
+        return (["1", "2", "3", "4", "5", "6"] if "first" in query else ["1", "2", "3"])[:limit]
+    def details(self, ids):
+        return [{"PMID": pmid, "publication_date": "2000-01-01" if pmid == "2" else today} for pmid in ids]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fetch)
+    monkeypatch.setattr(PubMedRetriever, "_finalise", details)
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    result = retriever._retrieve_raw_papers()
+    assert [p["PMID"] for p in result] == ["1", "3", "4", "5", "6"]
+    assert calls == [3, 3, 6]
+    assert sum(calls) <= 12
+    assert len(retriever.retrieval_audit["rounds"]) <= 3
+    assert retriever.retrieval_audit["unique_count"] == 6
+    assert retriever.retrieval_audit["after_date_filter_count"] == 5
+
+
+def test_theme_exhaustion_stops_without_backfill(config, monkeypatch):
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    calls = []
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda self, query, limit: calls.append(limit) or ["1"])
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert len(retriever._retrieve_raw_papers()) == 1
+    assert calls == [3, 3]
+    assert retriever.retrieval_audit["budget_exhausted"] is False
+
+def test_theme_backfill_can_fill_duplicate_gap(config, monkeypatch):
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda self, query, limit: (["1", "2", "3", "4", "5", "6"] if "first" in query else ["1", "2", "3"])[:limit])
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert len(retriever._retrieve_raw_papers()) == 6
+    assert retriever.retrieval_audit["budget_exhausted"] is False

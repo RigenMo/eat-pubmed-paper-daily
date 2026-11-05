@@ -463,6 +463,7 @@ class PubMedRetriever(BaseRetriever):
         self._pubmed_broad_query: str | None = None  # broad query (single OR group)
         self._pubmed_queries: list[str] = []          # corpus/theme queries for mode 5
         self._pubmed_queries_configured = False
+        self.retrieval_audit = {}
         self._max_results: int = int(self.retriever_config.get("max_results", 200))
         recommendation_config = config.get("recommendations", {})
         self._publication_days = int(config.executor.get("retrieval_days", 1))
@@ -652,6 +653,7 @@ class PubMedRetriever(BaseRetriever):
 
     def _retrieve_raw_papers(self) -> list[dict[str, Any]]:
         """Progressive fallback across query levels, escalating only when results < _MIN_RESULTS."""
+        self.retrieval_audit = {}
         today = datetime.now(_SHANGHAI).date()
         date_filter = self._date_filter(today)
         min_n = self._MIN_RESULTS
@@ -686,42 +688,83 @@ class PubMedRetriever(BaseRetriever):
                 logger.warning("PubMed: no valid corpus/theme queries were configured")
                 return []
 
-            per_query_limit = max(
-                1,
-                (self._max_results + len(self._pubmed_queries) - 1) // len(self._pubmed_queries),
-            )
-            query_results: list[list[str]] = []
-            for index, theme_query in enumerate(self._pubmed_queries, start=1):
-                query = f"({theme_query}) AND {date_filter}"
-                result = self._fetch_pmids_with_limit(query, per_query_limit)
-                logger.info(
-                    f"PubMed [theme {index}/{len(self._pubmed_queries)}] → "
-                    f"{len(result)} result(s)"
-                )
-                query_results.append(result)
+            count = len(self._pubmed_queries)
+            per_query_limit = max(1, (self._max_results + count - 1) // count)
+            budget = 2 * self._max_results
+            used = 0
+            query_results = [[] for _ in range(count)]
+            limits = [0] * count
+            eligible = list(range(count))
+            records_by_id = {}
+            queried_ids = set()
+            rounds = []
+            selected = []
+            unique_count = 0
 
-            # Round-robin de-duplication retains coverage across themes while
-            # keeping the configured total candidate limit.
-            selected: list[str] = []
-            seen_pmids: set[str] = set()
-            for offset in range(max((len(result) for result in query_results), default=0)):
-                for result in query_results:
-                    if offset >= len(result):
+            for round_index in range(3):
+                round_calls = []
+                candidates = eligible
+                if round_index:
+                    # A deeper prefix repeats earlier IDs, so spend the remaining
+                    # budget on a subset rather than refetching every old prefix.
+                    eligible = eligible[:max(1, len(eligible) // 2)]
+                next_eligible = candidates[len(eligible):]
+                for position, index in enumerate(eligible):
+                    remaining = budget - used
+                    if round_index == 0:
+                        limit = min(per_query_limit, remaining)
+                    else:
+                        share = remaining // (len(eligible) - position)
+                        limit = min(limits[index] * 2, share)
+                    if limit <= limits[index] or limit <= 0:
                         continue
-                    pmid = str(result[offset])
-                    if pmid in seen_pmids:
-                        continue
-                    seen_pmids.add(pmid)
-                    selected.append(pmid)
-                    if len(selected) >= self._max_results:
-                        break
-                if len(selected) >= self._max_results:
+                    query = f"({self._pubmed_queries[index]}) AND {date_filter}"
+                    result = self._fetch_pmids_with_limit(query, limit)
+                    used += limit  # Count full requested prefixes, including repeats.
+                    limits[index] = limit
+                    query_results[index] = result
+                    round_calls.append({"query_index": index + 1, "requested": limit, "returned": len(result)})
+                    if len(result) >= limit:
+                        next_eligible.append(index)
+                if not round_calls:
                     break
+                rounds.append(round_calls)
 
-            if not selected:
-                logger.warning("PubMed: no results found for corpus/theme queries")
-                return []
-            return _recent_results(selected)
+                # Interleave the prefixes before fetching only unseen records.
+                ordered = []
+                seen = set()
+                for offset in range(max((len(result) for result in query_results), default=0)):
+                    for result in query_results:
+                        if offset < len(result):
+                            pmid = str(result[offset])
+                            if pmid not in seen:
+                                seen.add(pmid)
+                                ordered.append(pmid)
+                unique_count = len(ordered)
+                new_ids = [pmid for pmid in ordered if pmid not in queried_ids]
+                if new_ids:
+                    for record in _recent_results(new_ids):
+                        if record.get("PMID") is not None:
+                            records_by_id[str(record["PMID"])] = record
+                    queried_ids.update(new_ids)
+                selected = [records_by_id[pmid] for pmid in ordered if pmid in records_by_id]
+                if len(selected) >= self._max_results or not next_eligible:
+                    break
+                eligible = next_eligible
+
+            self.retrieval_audit = {
+                "rounds": rounds,
+                "unique_count": unique_count,
+                "after_date_filter_count": len(selected),
+                "requested_id_budget": budget,
+                "requested_ids": used,
+                "round_limit_reached": len(rounds) >= 3 and len(selected) < self._max_results and bool(next_eligible),
+                "budget_exhausted": len(selected) < self._max_results and bool(next_eligible) and (
+                    used >= budget or all(budget - used <= limits[index] for index in next_eligible)
+                ),
+            }
+            logger.info(f"PubMed bounded theme retrieval: {len(rounds)} round(s), {used}/{budget} requested IDs")
+            return selected[:self._max_results]
 
         # Mode 5 deliberately has no keyword query: retrieve the recent PubMed
         # window first, then let the Zotero-based reranker select relevant papers.

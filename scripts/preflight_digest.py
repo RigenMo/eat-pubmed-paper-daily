@@ -69,6 +69,7 @@ def main(config: DictConfig):
             "reader_status": paper.reader_status,
             "card_characters": len(Paper._format_reading_card(paper.reading_card)) if paper.reading_card else None,
             "recommendation_matches": paper.recommendation_matches,
+            "innovation_assessment": paper.innovation_assessment,
         })
     (output / "index.html").write_text(html, encoding="utf-8")
     reports = OmegaConf.to_container(OmegaConf.create(reports), resolve=True)
@@ -78,6 +79,7 @@ def main(config: DictConfig):
         "complete_cards": sum(paper.reading_card is not None for paper in papers),
         "journals": dict(Counter(paper.journal for paper in papers)),
         "mail_sent": False,
+        "innovation_types": dict(Counter((paper.innovation_assessment or {}).get("type", "unclassified") for paper in papers)),
         "failure_type": type(failure).__name__ if failure else None,
     }
     print("PREFLIGHT_RESULT " + json.dumps(summary, ensure_ascii=False))
@@ -91,4 +93,3 @@ def main(config: DictConfig):
 
 if __name__ == "__main__":
     main()
-

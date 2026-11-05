@@ -440,3 +440,41 @@ def test_render_email_reports_missing_publication_date_once():
     assert "年份未提供" not in html
     assert "年份未核实" not in html
 
+
+def test_innovation_badges_and_safe_reason():
+    for kind, labels, colors in [
+        ('cognitive', ['认知差'], ['#6d28d9', '#ede9fe']),
+        ('capability', ['能力差'], ['#1d4ed8', '#dbeafe']),
+        ('mixed', ['认知差', '能力差'], ['#6d28d9', '#1d4ed8']),
+        ('unknown', ['待判定'], ['#4b5563', '#f3f4f6']),
+        ('uncertain', ['待判定'], ['#4b5563', '#f3f4f6']),
+    ]:
+        paper = make_sample_paper(tldr='原有内容')
+        paper.innovation_assessment = {'type': kind, 'reason': '<img src=x onerror=alert(1)>', 'evidence': '隐藏引文'}
+        html = render_email([paper])
+        for label in labels:
+            assert f'>{label}</strong>' in html
+        for color in colors:
+            assert color in html
+        assert '&lt;img src=x onerror=alert(1)&gt;' in html
+        assert '<img src=x' not in html
+        assert '隐藏引文' not in html
+        assert '原有内容' in html and 'JIF(影响因子)' in html
+
+
+def test_legacy_paper_has_no_innovation_badge():
+    paper = make_sample_paper(tldr='原有内容')
+    paper.innovation_assessment = None
+    html = render_email([paper])
+    assert '摘要判读：' not in html
+    assert '待判定</strong>' not in html
+
+
+def test_current_focus_is_not_presented_as_zotero():
+    paper = make_sample_paper(tldr='摘要')
+    paper.recommendation_matches = [{'basis': 'current_focus', 'reason': '与当前课题相关', 'candidate_quote': '隐藏原文'}]
+    html = render_email([paper])
+    assert '当前课题关联' in html
+    assert '与当前课题相关' in html
+    assert '与 Zotero 的关系' not in html
+    assert '隐藏原文' not in html

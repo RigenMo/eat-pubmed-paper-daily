@@ -502,7 +502,29 @@ def _build_recommendation_html(matches: Any) -> str:
 
     if not entries:
         return ""
-    return _section_row("与 Zotero 的关系", "".join(entries))
+    has_focus = any(isinstance(item, Mapping) and item.get("basis") == "current_focus" for item in matches)
+    has_zotero = any(isinstance(item, Mapping) and item.get("basis") != "current_focus" for item in matches)
+    heading = "推荐理由" if has_focus and has_zotero else "当前课题关联" if has_focus else "与 Zotero 的关系"
+    return _section_row(heading, "".join(entries))
+
+
+def _build_innovation_html(assessment: Any) -> str:
+    if not isinstance(assessment, Mapping):
+        return ""
+    kind = assessment.get("type")
+    labels = {
+        "cognitive": [("认知差", "#6d28d9", "#ede9fe")],
+        "capability": [("能力差", "#1d4ed8", "#dbeafe")],
+        "mixed": [("认知差", "#6d28d9", "#ede9fe"), ("能力差", "#1d4ed8", "#dbeafe")],
+    }.get(kind, [("待判定", "#4b5563", "#f3f4f6")])
+    badges = "".join(
+        f'<strong style="display:inline-block; margin:2px 6px 2px 0; padding:4px 8px; '
+        f'border-radius:4px; color:{color}; background-color:{background}; font-size:13px;">{label}</strong>'
+        for label, color, background in labels
+    )
+    reason = _text_value(assessment.get("reason")).strip()
+    reason_html = f'<div style="margin-top:4px; color:#555555; font-size:13px;">摘要判读：{escape(reason)}</div>' if reason else ""
+    return f'<tr><td style="padding:2px 16px 6px; line-height:1.5;">{badges}{reason_html}</td></tr>'
 
 
 def get_block_html(
@@ -525,6 +547,7 @@ def get_block_html(
     publication_history: Any = None,
     recommendation_matches: Any = None,
     show_missing_date: bool = False,
+    innovation_assessment: Any = None,
 ):
     """Build one valid table card; the positional legacy signature is kept."""
     journal_text = _text_value(journal).strip()
@@ -573,6 +596,7 @@ def get_block_html(
         </td>
       </tr>
       {title_zh_row}
+      {innovation_row}
       {source_row}
       {metrics_row}
       <tr>
@@ -593,6 +617,7 @@ def get_block_html(
     return block_template.format(
         title=_render_rich_text(title),
         title_zh_row=title_zh_row,
+        innovation_row=_build_innovation_html(innovation_assessment),
         source_row=source_row,
         metrics_row=metrics_row,
         authors=_render_rich_text(authors),
@@ -673,9 +698,9 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
                 publication_history=getattr(paper, "publication_history", None),
                 recommendation_matches=getattr(paper, "recommendation_matches", None),
                 show_missing_date=True,
+                innovation_assessment=getattr(paper, "innovation_assessment", None),
             )
         )
 
     content = '<div style="height:16px; line-height:16px;">&nbsp;</div>'.join(parts)
     return framework.replace("__CONTENT__", content)
-
