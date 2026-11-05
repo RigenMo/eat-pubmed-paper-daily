@@ -618,3 +618,67 @@ def test_theme_backfill_can_fill_duplicate_gap(config, monkeypatch):
     retriever.set_pubmed_queries(["first", "second"])
     assert len(retriever._retrieve_raw_papers()) == 6
     assert retriever.retrieval_audit["budget_exhausted"] is False
+
+def _http_error(status):
+    import requests
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError("private response", response=response)
+
+
+def test_theme_server_failure_skips_one_query(config, monkeypatch):
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    def fetch(self, query, limit):
+        if "first" in query:
+            raise _http_error(500)
+        return ["7"]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fetch)
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert [p["PMID"] for p in retriever._retrieve_raw_papers()] == ["7"]
+    assert retriever.retrieval_audit["failed_queries"] == [{"query_index": 1, "http_status": 500}]
+    assert retriever.retrieval_audit["successful_queries"] == 1
+    assert retriever.retrieval_audit["requested_ids"] == 6
+    assert "private response" not in str(retriever.retrieval_audit)
+
+
+def test_theme_expansion_server_failure_keeps_initial_prefix(config, monkeypatch):
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    def fetch(self, query, limit):
+        if limit > 3:
+            raise _http_error(503)
+        return ["1", "2", "3"]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fetch)
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert [p["PMID"] for p in retriever._retrieve_raw_papers()] == ["1", "2", "3"]
+    assert retriever.retrieval_audit["failed_queries"] == [{"query_index": 1, "http_status": 503}]
+    assert retriever.retrieval_audit["requested_ids"] == 12
+
+
+def test_all_theme_server_failures_raise_with_audit(config, monkeypatch):
+    import requests
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda self, query, limit: (_ for _ in ()).throw(_http_error(500)))
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    with pytest.raises(requests.HTTPError):
+        retriever._retrieve_raw_papers()
+    assert retriever.retrieval_audit["successful_queries"] == 0
+    assert len(retriever.retrieval_audit["failed_queries"]) == 2
+    assert retriever.retrieval_audit["requested_ids"] == 6
+
+
+def test_theme_client_error_is_not_swallowed(config, monkeypatch):
+    import requests
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda self, query, limit: (_ for _ in ()).throw(_http_error(400)))
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    with pytest.raises(requests.HTTPError):
+        retriever._retrieve_raw_papers()
+    assert retriever.retrieval_audit["requested_ids"] == 3
