@@ -60,6 +60,9 @@ def test_ten_complete_reports_keep_other_topics_and_separate_focus_basis(config,
     decisions = executor.selection_audit["selection"]
     assert sum(item["selected"] for item in decisions) == 10
     assert any("focus_limit" in item["skip_reasons"] for item in decisions)
+    exported = (tmp_path / "outputs" / "recommendation-audit-summary.json").read_text(encoding="utf-8")
+    assert "pubmed.ncbi.nlm.nih.gov" not in exported
+    assert "Anchor" not in exported and "candidate_quote" not in exported
 
 
 def test_balanced_mode_restores_library_gate_for_every_candidate(config, monkeypatch, tmp_path):

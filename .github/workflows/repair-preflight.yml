@@ -39,6 +39,6 @@ jobs:
         if: always()
         with:
           name: ${{ matrix.mode }}-reports
-          path: outputs/preflight/${{ matrix.mode }}/
+          path: outputs/preflight/${{ matrix.mode }}/summary.json
           retention-days: 7
           if-no-files-found: ignore

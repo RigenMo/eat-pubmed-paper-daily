@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from loguru import logger
 from pyzotero import zotero
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -325,10 +326,24 @@ class Executor:
             "relevance": getattr(self, "recommendation_audit", []), "selection": selection,
         }
         self.selection_audit = audit
+        summary = {
+            "schema_version": 1, "focus_mode": mode, "retrieval": audit["retrieval"],
+            "relevance_checked": len(audit["relevance"]),
+            "relevance_rejected": sum(not item.get("related", False) for item in audit["relevance"]),
+            "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
+            "selection_candidates": len(selection),
+            "selected_count": sum(item["selected"] for item in selection),
+            "skip_counts": dict(Counter(reason for item in selection for reason in item["skip_reasons"])),
+            "selected_innovation_types": dict(Counter(
+                (item.get("innovation") or {}).get("type", "unclassified")
+                for item in selection if item["selected"]
+            )),
+        }
+        self.selection_audit_summary = summary
         try:
-            path = Path("outputs/recommendation-audit.json")
+            path = Path("outputs/recommendation-audit-summary.json")
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
             logger.warning("Could not persist recommendation audit")
 
