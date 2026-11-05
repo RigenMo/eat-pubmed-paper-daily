@@ -1,0 +1,108 @@
+name: Privacy-safe cognitive digest acceptance
+on:
+  push:
+    branches: [codex/cognitive-acceptance-20261105]
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTHONPATH: src
+      ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+      ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+      OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+      EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Check public classifier and keep private recommendation data inside runner
+        run: |
+          test -n "$OPENAI_API_KEY"
+          uv run python - <<'PY'
+          import contextlib
+          import io
+          import json
+          import logging
+          import os
+          from collections import Counter
+          from datetime import datetime,timedelta,timezone
+          from pathlib import Path
+          from hydra import compose,initialize_config_dir
+          from loguru import logger
+          from openai import OpenAI
+          from zotero_arxiv_daily.executor import Executor
+          from zotero_arxiv_daily.innovation import assess_innovation
+          from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever,_publication_in_window
+          # Existing authorized GitHub processing; never publish Zotero entries,
+          # matches, quotes, article lists, reports, or their content-bearing logs.
+          # Only fixed-schema aggregate counts/booleans are exported.
+          logger.remove()
+          logging.disable(logging.CRITICAL)
+          out=Path('outputs/privacy-safe-acceptance-summary.json')
+          out.parent.mkdir(exist_ok=True)
+          with initialize_config_dir(version_base=None,config_dir=os.path.abspath('config')):
+              config=compose(config_name='default',overrides=[
+                  'llm.api.key=${oc.env:OPENAI_API_KEY}',
+                  'llm.api.base_url=https://llm.goaichat.top/v1',
+                  'llm.api.timeout=600','llm.api.max_retries=1',
+                  'llm.generation_kwargs.model=kimi-k3','llm.generation_kwargs.max_tokens=65536','llm.max_input_tokens=1000000',
+                  'executor.debug=false','executor.send_empty=true','executor.character_pool=[]',
+                  'search.mode=5','source.mix_mode=1',
+                  'recommendations.enabled=true','recommendations.innovation_enabled=true',
+                  'recommendations.max_papers=10','recommendations.max_per_journal=3','recommendations.max_focus_papers=6',
+                  'recommendations.publication_days=90','recommendations.candidate_limit=800',
+                  'recommendations.verify_limit=120','recommendations.focus_mode=ukb_multimorbidity',
+                  'source.pubmed.max_results=800',
+                  'email.sender=preflight@example.invalid','email.receiver=preflight@example.invalid',
+                  'email.smtp_server=localhost','email.smtp_port=1','email.sender_password=unused',
+              ])
+          client=OpenAI(api_key=config.llm.api.key,base_url=config.llm.api.base_url,timeout=600,max_retries=1)
+          summary={'mail_sent':False,'privacy':'aggregate counts only','failure_type':None}
+          try:
+              # Public, fixed fixtures unrelated to the private library selection.
+              with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                  retriever=PubMedRetriever(config)
+                  public=[retriever.convert_to_paper(record) for record in retriever._fetch_details(['30305743','23746838'])]
+                  public=[paper for paper in public if paper]
+                  assess_innovation(public,client,config.llm)
+              summary['public_classifier_count']=len(public)
+              summary['public_classifier_types']=dict(Counter(paper.innovation_assessment['type'] for paper in public))
+              assert len(public)==2 and any(paper.innovation_assessment['type']!='uncertain' for paper in public)
+              print('PUBLIC_CLASSIFIER',json.dumps(summary['public_classifier_types']))
+              with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                  executor=Executor(config)
+                  count=executor.run(send_mail=False)
+              papers=executor.last_papers
+              today=datetime.now(timezone(timedelta(hours=8))).date()
+              journals=Counter(' '.join((paper.journal or '').casefold().split()) for paper in papers)
+              focus=sum(any(match.get('basis')=='current_focus' for match in (paper.recommendation_matches or [])) for paper in papers)
+              summary.update({
+                  'papers':count,'complete_cards':sum(bool(p.reading_card and p.abstract_zh and p.reader_status=='success') for p in papers),
+                  'focus_papers':focus,'other_papers':len(papers)-focus,
+                  'journal_count':len(journals),'max_per_journal':max(journals.values(),default=0),
+                  'innovation_types':dict(Counter((p.innovation_assessment or {}).get('type','unclassified') for p in papers)),
+                  'all_if_at_least10':all(float((p.journal_metrics or {}).get('jif',0))>=10 for p in papers),
+                  'all_within90_days':all(_publication_in_window(p.publication_date,today-timedelta(days=90),today) for p in papers),
+                  'selection_counts':executor.selection_audit_summary,
+              })
+              assert summary['papers']==summary['complete_cards']==10
+              assert summary['all_if_at_least10'] and summary['all_within90_days']
+              assert summary['max_per_journal']<=3 and focus<=6
+              assert any((p.innovation_assessment or {}).get('type')!='uncertain' for p in papers)
+          except Exception as error:
+              summary['failure_type']=type(error).__name__
+              out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+              print('PRIVATE_PREFLIGHT_AGGREGATE',json.dumps(summary,ensure_ascii=False))
+              raise RuntimeError('Privacy-safe preflight failed: '+type(error).__name__) from None
+          out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('PRIVATE_PREFLIGHT_AGGREGATE',json.dumps(summary,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aggregate-acceptance-counts
+          path: outputs/privacy-safe-acceptance-summary.json
+          retention-days: 7
+          if-no-files-found: ignore
