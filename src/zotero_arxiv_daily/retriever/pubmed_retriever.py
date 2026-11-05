@@ -13,6 +13,7 @@ from ..protocol import Paper
 _ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 _EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _RATE_SLEEP = 0.34  # ≤3 requests/second without API key
+_SHANGHAI = timezone(timedelta(hours=8))
 
 _MONTH_NUMBERS = {
     "jan": "01",
@@ -553,13 +554,13 @@ class PubMedRetriever(BaseRetriever):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _date_filter(self) -> str:
-        """Search publication and electronic dates using explicit UTC bounds.
+    def _date_filter(self, today=None) -> str:
+        """Search publication and electronic dates using Shanghai date bounds.
 
         https://pubmed.ncbi.nlm.nih.gov/help/#publication-date-dp
         """
         retrieval_days = self._publication_days
-        today = datetime.now(timezone.utc).date()
+        today = today or datetime.now(_SHANGHAI).date()
         start = today - timedelta(days=retrieval_days)
         lower = start.strftime("%Y/%m/%d")
         upper = today.strftime("%Y/%m/%d")
@@ -651,7 +652,8 @@ class PubMedRetriever(BaseRetriever):
 
     def _retrieve_raw_papers(self) -> list[dict[str, Any]]:
         """Progressive fallback across query levels, escalating only when results < _MIN_RESULTS."""
-        date_filter = self._date_filter()
+        today = datetime.now(_SHANGHAI).date()
+        date_filter = self._date_filter(today)
         min_n = self._MIN_RESULTS
         seen_queries: set[str] = set()
 
@@ -671,7 +673,6 @@ class PubMedRetriever(BaseRetriever):
 
         def _recent_results(ids: list[str]) -> list[dict[str, Any]]:
             records = self._finalise(ids)
-            today = datetime.now(timezone.utc).date()
             start = today - timedelta(days=self._publication_days)
             return [record for record in records if _publication_in_window(record.get("publication_date"), start, today)]
 
