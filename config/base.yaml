@@ -33,6 +33,7 @@ source:
     category: null # The categories of target medrxiv papers. Find categories from [here](https://www.medrxiv.org/) Example: ["psychiatry and clinical psychology", "neurology"]
   pubmed:
     max_results: 800 # Candidate pool; automatic recommendation mode uses this independently of delivery count.
+    public_index_fallback: true # Public dates/topics only; never send Zotero terms to another index.
 
 email:
   sender: ??? # The email account of the SMTP server that sends you email. Example: abc@qq.com

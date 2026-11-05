@@ -178,7 +178,7 @@ uv run src/zotero_arxiv_daily/main.py
 
 也可在 `CUSTOM_CONFIG` 的 `recommendations.focus_until` 填写带引号的日期（例如 `"2026-12-31"`），该日结束后自动恢复均衡方向；不填时不会猜测课题何时完成。`max_focus_papers` 可调整当前课题篇数上限。日常运行不需要每天手动切换。
 
-检索有去重、日期筛选后的有界补检。若候选预算用完仍不足10篇，邮件和自动告警显示实际数量，不能放宽资格或编造论文补数。诊断用的逐篇判读和 Zotero 关联不额外归档；邮件仍按收件设置投递。Actions 的 `recommendation-audit` 产物只保存检索、筛选、配额和类型的汇总计数，不导出 Zotero 条目、关联引文或逐篇推荐清单。
+检索有去重、日期筛选后的有界补检。NCBI 检索接口异常时，可从 Europe PMC 的公开索引补充 PubMed 编号，再通过 PubMed 获取论文信息并执行原筛选；备用索引只接收日期范围和用户明确指定的公开主题，不接收 Zotero 条目或其提取词。可通过 `source.pubmed.public_index_fallback=false` 关闭此兜底。若候选预算用完仍不足10篇，邮件和自动告警显示实际数量，不能放宽资格或编造论文补数。诊断用的逐篇判读和 Zotero 关联不额外归档；邮件仍按收件设置投递。Actions 的 `recommendation-audit` 产物只保存检索、筛选、配额和类型的汇总计数，不导出 Zotero 条目、关联引文或逐篇推荐清单。
 
 ## 📖 工作原理
 本项目首先通过相应 API 获取你 Zotero 文献库中的所有论文（如果已配置），以及从已配置来源（arXiv / bioRxiv / medRxiv / PubMed）发布的所有新论文。然后通过 embedding 模型计算每篇论文摘要的向量表示，和/或将其与你的自然语言关键词进行匹配。一篇论文的最终得分融合了关键词相关度，以及它与你 Zotero 文献库论文的加权平均相似度（越晚加入文献库的论文权重越高）。每篇论文的 TL;DR 由 LLM 根据从论文中提取的文本生成。

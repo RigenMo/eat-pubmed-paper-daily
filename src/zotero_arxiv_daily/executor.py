@@ -451,14 +451,16 @@ class Executor:
                 reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
                 verify_limit = int(recommendation_config.get("verify_limit", 120))
                 self.recommendation_audit = []
-                candidates = reranked_papers[:verify_limit]
-                focused = []
+                candidates = reranked_papers
+                focus_candidates = []
                 library_candidates = []
                 for paper in candidates:
                     evidence = focus_evidence(paper, focus_mode)
                     if evidence:
+                        if len(focus_candidates) >= max(1, verify_limit // 2):
+                            continue
                         paper.recommendation_matches = [evidence]
-                        focused.append(paper)
+                        focus_candidates.append(paper)
                         self.recommendation_audit.append({
                             "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
                             "jif": (paper.journal_metrics or {}).get("jif"), "related": True,
@@ -466,12 +468,13 @@ class Executor:
                         })
                     else:
                         library_candidates.append(paper)
+                library_candidates = library_candidates[:verify_limit]
                 verified_library = verify_recommendations(
                     library_candidates, self.openai_client, self.config.llm,
                     batch_size=int(recommendation_config.get("batch_size", 5)),
                     audit=self.recommendation_audit,
                 )
-                reranked_papers = focused + verified_library
+                reranked_papers = focus_candidates + verified_library
                 if recommendation_config.get("innovation_enabled", True):
                     assess_innovation(reranked_papers, self.openai_client, self.config.llm)
                 reranked_papers = order_candidates(reranked_papers, focus_mode)
@@ -509,12 +512,12 @@ class Executor:
                 if len(selected) >= max_paper_num:
                     break
                 journal = " ".join((p.journal or "").casefold().split())
-                focused = bool(focus_evidence(p, focus_mode))
+                is_focus = bool(focus_evidence(p, focus_mode))
                 record = records[id(p)]
                 record["skip_reasons"] = []
                 if verify_related and journal_counts.get(journal, 0) >= per_journal:
                     record["skip_reasons"].append("journal_limit")
-                if focused and focus_count >= focus_limit:
+                if is_focus and focus_count >= focus_limit:
                     record["skip_reasons"].append("focus_limit")
                 if record["skip_reasons"]:
                     continue
@@ -528,7 +531,7 @@ class Executor:
                 selected.append(p)
                 record["selected"] = True
                 journal_counts[journal] = journal_counts.get(journal, 0) + 1
-                focus_count += int(focused)
+                focus_count += int(is_focus)
             if len(selected) >= max_paper_num:
                 for record in selection:
                     if record["skip_reasons"] == ["not_processed"]:
