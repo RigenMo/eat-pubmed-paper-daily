@@ -41,6 +41,7 @@ def _base_config():
                 "reranker.api.model=text-embedding-3-large",
                 "source.arxiv.category=[cs.AI,cs.CV]",
                 "source.mix_mode=5",
+                "source.pubmed.public_index_fallback=false",
                 "executor.source=[arxiv]",
                 "executor.reranker=api",
                 "executor.debug=false",

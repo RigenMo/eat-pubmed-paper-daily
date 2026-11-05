@@ -41,3 +41,26 @@ def test_within_innovation_type_focus_and_then_recency_apply():
         paper.innovation_assessment = {"type": "cognitive"}
     assert order_candidates([other, focus], "ukb_multimorbidity") == [focus, other]
     assert order_candidates([other, focus], "balanced") == [other, focus]
+
+
+def test_workflow_overrides_legacy_five_paper_settings(monkeypatch):
+    import shlex
+    from pathlib import Path
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+    monkeypatch.setenv("RECOMMENDATION_FOCUS", "balanced")
+    root = Path(__file__).resolve().parents[1]
+    line = next(line.strip() for line in (root / '.github/workflows/main.yml').read_text(encoding='utf-8').splitlines() if 'uv run src/' in line)
+    overrides = ['executor.max_paper_num=5', 'executor.debug=true', 'recommendations.max_papers=5'] + shlex.split(line)[3:]
+    GlobalHydra.instance().clear()
+    try:
+        with initialize_config_dir(version_base=None, config_dir=str(root / 'config')):
+            config = compose(config_name='default', overrides=overrides)
+        assert config.executor.max_paper_num == config.recommendations.max_papers == 10
+        assert config.executor.debug is False
+        assert config.search.mode == 5 and config.source.mix_mode == 1
+        assert effective_focus_mode(config.recommendations) == 'balanced'
+    finally:
+        GlobalHydra.instance().clear()

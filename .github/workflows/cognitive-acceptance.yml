@@ -56,7 +56,7 @@ jobs:
                   'recommendations.max_papers=10','recommendations.max_per_journal=3','recommendations.max_focus_papers=6',
                   'recommendations.publication_days=90','recommendations.candidate_limit=800',
                   'recommendations.verify_limit=120','recommendations.focus_mode=ukb_multimorbidity',
-                  'source.pubmed.max_results=800',
+                  'source.pubmed.max_results=800','source.pubmed.public_index_fallback=true','executor.max_paper_num=10',
                   'email.sender=preflight@example.invalid','email.receiver=preflight@example.invalid',
                   'email.smtp_server=localhost','email.smtp_port=1','email.sender_password=unused',
               ])
@@ -91,7 +91,7 @@ jobs:
                   'innovation_types':dict(Counter((p.innovation_assessment or {}).get('type','unclassified') for p in papers)),
                   'all_if_at_least10':all(float((p.journal_metrics or {}).get('jif',0))>=10 for p in papers),
                   'all_within90_days':all(_publication_in_window(p.publication_date,today-timedelta(days=90),today) for p in papers),
-                  'selection_counts':executor.selection_audit_summary,
+                  'selection_counts':getattr(executor,'selection_audit_summary',{}),
               })
               assert summary['papers']==summary['complete_cards']==10
               assert summary['all_if_at_least10'] and summary['all_within90_days']

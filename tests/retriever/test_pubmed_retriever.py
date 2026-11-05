@@ -682,3 +682,173 @@ def test_theme_client_error_is_not_swallowed(config, monkeypatch):
     with pytest.raises(requests.HTTPError):
         retriever._retrieve_raw_papers()
     assert retriever.retrieval_audit["requested_ids"] == 3
+
+
+def test_public_fallback_expiry_restores_date_only_mode(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    config.search.mode = 5
+    config.recommendations.enabled = True
+    config.recommendations.focus_mode = 'ukb_multimorbidity'
+    config.recommendations.focus_until = '2000-01-01'
+    config.source.pubmed.public_index_fallback = True
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    calls = []
+    monkeypatch.setattr(PubMedRetriever, '_fetch_pmids_with_limit', lambda *args: (_ for _ in ()).throw(_http_error(500)))
+    monkeypatch.setattr(PubMedRetriever, '_finalise', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
+    monkeypatch.setattr(module, 'search_public_index', lambda *args: calls.append(args) or (['9'], []))
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries(['PRIVATE_LIBRARY_TERM'])
+    assert retriever._retrieve_raw_papers()[0]['PMID'] == '9'
+    assert calls[0][-1] == 'balanced' and 'PRIVATE_' not in repr(calls)
+
+
+def test_repeated_invalid_provider_responses_fail_over_before_all_queries(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    config.search.mode = 5
+    config.recommendations.enabled = True
+    config.source.pubmed.public_index_fallback = True
+    calls = []
+    def invalid(*args):
+        calls.append(True)
+        raise module.PubMedSearchResponseError()
+    today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+    monkeypatch.setattr(PubMedRetriever, '_fetch_pmids_with_limit', invalid)
+    monkeypatch.setattr(PubMedRetriever, '_finalise', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
+    monkeypatch.setattr(module, 'search_public_index', lambda *args: (['9'], []))
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries(['one','two','three','four'])
+    assert retriever._retrieve_raw_papers()[0]['PMID'] == '9'
+    assert len(calls) == 3 and retriever.retrieval_audit['early_public_failover'] is True
+
+@pytest.mark.parametrize("payload", [
+    {}, [], {"esearchresult": None}, {"esearchresult": {}},
+    {"esearchresult": {"idlist": ["secret"]}},
+    {"esearchresult": {"idlist": [], "count": "1"}},
+    {"esearchresult": {"idlist": [], "count": "-1"}},
+])
+def test_invalid_search_response_is_not_zero(config, monkeypatch, payload):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=lambda: payload))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    with pytest.raises(module.PubMedSearchResponseError, match="^Invalid PubMed search response$"):
+        PubMedRetriever(config)._fetch_pmids("private")
+
+
+def test_invalid_search_json_is_safe(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    def bad_json():
+        raise ValueError("private response")
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=bad_json))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    with pytest.raises(module.PubMedSearchResponseError, match="^Invalid PubMed search response$"):
+        PubMedRetriever(config)._fetch_pmids("private")
+
+
+def test_search_real_zero_is_valid(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=lambda: {"esearchresult": {"idlist": [], "count": "0"}}))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    assert PubMedRetriever(config)._fetch_pmids("private") == []
+
+
+def test_invalid_theme_does_not_block_valid_theme(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    def fetch(self, query, limit):
+        if "first" in query:
+            raise module.PubMedSearchResponseError()
+        return ["7"]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fetch)
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert [p["PMID"] for p in retriever._retrieve_raw_papers()] == ["7"]
+    assert retriever.retrieval_audit["failed_queries"] == [{"query_index": 1, "error_type": "invalid_search_response"}]
+    assert retriever.retrieval_audit["requested_ids"] == 6
+
+
+def test_all_invalid_themes_raise(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    def fail(*args):
+        raise module.PubMedSearchResponseError()
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fail)
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    with pytest.raises(module.PubMedSearchResponseError):
+        retriever._retrieve_raw_papers()
+    assert retriever.retrieval_audit["successful_queries"] == 0
+    assert len(retriever.retrieval_audit["failed_queries"]) == 2
+
+def test_public_index_recovers_failed_themes_without_private_queries(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    from omegaconf import open_dict
+    with open_dict(config):
+        config.search.mode = 5
+        config.recommendations.enabled = True
+        config.source.pubmed.public_index_fallback = True
+        config.recommendations.focus_mode = "balanced"
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda *args: (_ for _ in ()).throw(module.PubMedSearchResponseError()))
+    captured = []
+    def fallback(today, days, limit, focus):
+        captured.append((today, days, limit, focus))
+        return ["7", "8"], [{"query_index": 1, "requested": 6, "returned": 2}]
+    monkeypatch.setattr(module, "search_public_index", fallback)
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today if i == "7" else "2000-01-01"} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["PRIVATE title"])
+    assert [p["PMID"] for p in retriever._retrieve_raw_papers()] == ["7"]
+    assert captured[0][2:] == (6, "balanced")
+    assert "PRIVATE" not in str(captured)
+
+
+def test_public_index_never_masks_4xx(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    import requests
+    from omegaconf import open_dict
+    with open_dict(config):
+        config.search.mode = 5
+        config.recommendations.enabled = True
+        config.source.pubmed.public_index_fallback = True
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda *args: (_ for _ in ()).throw(_http_error(400)))
+    monkeypatch.setattr(module, "search_public_index", lambda *args: pytest.fail("unexpected fallback"))
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries(["theme"])
+    with pytest.raises(requests.HTTPError):
+        retriever._retrieve_raw_papers()
+
+def test_public_index_not_used_when_primary_succeeds(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    from omegaconf import open_dict
+    with open_dict(config):
+        config.search.mode = 5
+        config.recommendations.enabled = True
+        config.source.pubmed.public_index_fallback = True
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda *args: ["1"])
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    monkeypatch.setattr(module, "search_public_index", lambda *args: pytest.fail("unexpected fallback"))
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(4)
+    retriever.set_pubmed_queries(["theme"])
+    assert len(retriever._retrieve_raw_papers()) == 1
+
+
+def test_public_index_failure_is_not_zero(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    from omegaconf import open_dict
+    with open_dict(config):
+        config.search.mode = 5
+        config.recommendations.enabled = True
+        config.source.pubmed.public_index_fallback = True
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda *args: (_ for _ in ()).throw(module.PubMedSearchResponseError()))
+    def fail(*args):
+        raise RuntimeError("public index unavailable")
+    monkeypatch.setattr(module, "search_public_index", fail)
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries(["theme"])
+    with pytest.raises(RuntimeError, match="public index unavailable"):
+        retriever._retrieve_raw_papers()

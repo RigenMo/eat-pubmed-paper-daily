@@ -243,7 +243,7 @@ class Executor:
 
     def filter_corpus(self, corpus: list[CorpusPaper]) -> list[CorpusPaper]:
         if self.include_path_patterns:
-            logger.info(f"Selecting zotero papers matching include_path: {self.include_path_patterns}")
+            logger.info("Applying Zotero collection inclusion rules")
             corpus = [
                 c for c in corpus
                 if any(
@@ -253,7 +253,7 @@ class Executor:
                 )
             ]
         if self.ignore_path_patterns:
-            logger.info(f"Excluding zotero papers matching ignore_path: {self.ignore_path_patterns}")
+            logger.info("Applying Zotero collection exclusion rules")
             corpus = [
                 c for c in corpus
                 if not any(
@@ -263,9 +263,7 @@ class Executor:
                 )
             ]
         if self.include_path_patterns or self.ignore_path_patterns:
-            samples = random.sample(corpus, min(5, len(corpus)))
-            samples = '\n'.join([c.title + ' - ' + '\n'.join(c.paths) for c in samples])
-            logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
+            logger.info(f"Applied Zotero collection filters; selected {len(corpus)} references")
         return corpus
 
     # ------------------------------------------------------------------
@@ -453,14 +451,16 @@ class Executor:
                 reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
                 verify_limit = int(recommendation_config.get("verify_limit", 120))
                 self.recommendation_audit = []
-                candidates = reranked_papers[:verify_limit]
-                focused = []
+                candidates = reranked_papers
+                focus_candidates = []
                 library_candidates = []
                 for paper in candidates:
                     evidence = focus_evidence(paper, focus_mode)
                     if evidence:
+                        if len(focus_candidates) >= max(1, verify_limit // 2):
+                            continue
                         paper.recommendation_matches = [evidence]
-                        focused.append(paper)
+                        focus_candidates.append(paper)
                         self.recommendation_audit.append({
                             "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
                             "jif": (paper.journal_metrics or {}).get("jif"), "related": True,
@@ -468,12 +468,13 @@ class Executor:
                         })
                     else:
                         library_candidates.append(paper)
+                library_candidates = library_candidates[:verify_limit]
                 verified_library = verify_recommendations(
                     library_candidates, self.openai_client, self.config.llm,
                     batch_size=int(recommendation_config.get("batch_size", 5)),
                     audit=self.recommendation_audit,
                 )
-                reranked_papers = focused + verified_library
+                reranked_papers = focus_candidates + verified_library
                 if recommendation_config.get("innovation_enabled", True):
                     assess_innovation(reranked_papers, self.openai_client, self.config.llm)
                 reranked_papers = order_candidates(reranked_papers, focus_mode)
@@ -500,7 +501,7 @@ class Executor:
                     "jif": (paper.journal_metrics or {}).get("jif"),
                     "innovation": paper.innovation_assessment,
                     "current_focus": bool(focus_evidence(paper, focus_mode)), "selected": False,
-                    "skip_reasons": ["target_already_filled"],
+                    "skip_reasons": ["not_processed"],
                 }
                 records[id(paper)] = record
                 selection.append(record)
@@ -511,12 +512,12 @@ class Executor:
                 if len(selected) >= max_paper_num:
                     break
                 journal = " ".join((p.journal or "").casefold().split())
-                focused = bool(focus_evidence(p, focus_mode))
+                is_focus = bool(focus_evidence(p, focus_mode))
                 record = records[id(p)]
                 record["skip_reasons"] = []
                 if verify_related and journal_counts.get(journal, 0) >= per_journal:
                     record["skip_reasons"].append("journal_limit")
-                if focused and focus_count >= focus_limit:
+                if is_focus and focus_count >= focus_limit:
                     record["skip_reasons"].append("focus_limit")
                 if record["skip_reasons"]:
                     continue
@@ -530,7 +531,11 @@ class Executor:
                 selected.append(p)
                 record["selected"] = True
                 journal_counts[journal] = journal_counts.get(journal, 0) + 1
-                focus_count += int(focused)
+                focus_count += int(is_focus)
+            if len(selected) >= max_paper_num:
+                for record in selection:
+                    if record["skip_reasons"] == ["not_processed"]:
+                        record["skip_reasons"] = ["target_already_filled"]
             if verify_related:
                 self._save_selection_audit(focus_mode, selection)
             reader_count = sum(p.reading_card is not None for p in attempted)
@@ -583,8 +588,7 @@ class Executor:
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),
                 "papers": [
                     {"url": p.url, "journal": p.journal, "publication_date": p.publication_date,
-                     "jif": (p.journal_metrics or {}).get("jif"),
-                     "innovation_type": (p.innovation_assessment or {}).get("type")}
+                     "jif": (p.journal_metrics or {}).get("jif")}
                     for p in reranked_papers
                 ],
             }

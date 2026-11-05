@@ -70,3 +70,26 @@ def test_balanced_mode_restores_library_gate_for_every_candidate(config, monkeyp
     assert executor.run(send_mail=False) == 10
     assert len(verified) == 16
     assert all("basis" not in paper.recommendation_matches[0] for paper in executor.last_papers)
+
+
+def test_focus_candidates_do_not_use_up_other_topics_verification_budget(config, monkeypatch, tmp_path):
+    executor, verified = prepare(config, monkeypatch, tmp_path, "ukb_multimorbidity")
+    config.recommendations.verify_limit = 10
+    assert executor.run(send_mail=False) == 10
+    assert len(verified) == 8
+    assert all(not paper.title.startswith("UK Biobank") for paper in verified)
+
+
+def test_library_filter_logs_counts_without_private_titles_or_paths(monkeypatch):
+    from types import SimpleNamespace
+    from zotero_arxiv_daily.executor import Executor
+
+    executor = Executor.__new__(Executor)
+    executor.include_path_patterns = ['PRIVATE_FOLDER']
+    executor.ignore_path_patterns = None
+    messages = []
+    monkeypatch.setattr('zotero_arxiv_daily.executor.glob_match', lambda *args: True)
+    monkeypatch.setattr('zotero_arxiv_daily.executor.logger', SimpleNamespace(info=messages.append))
+    corpus = [CorpusPaper('PRIVATE_TITLE', 'PRIVATE_ABSTRACT', datetime(2026, 1, 1), ['PRIVATE_FOLDER'])]
+    assert executor.filter_corpus(corpus) == corpus
+    assert messages and all('PRIVATE_' not in message for message in messages)
