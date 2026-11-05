@@ -263,9 +263,7 @@ class Executor:
                 )
             ]
         if self.include_path_patterns or self.ignore_path_patterns:
-            samples = random.sample(corpus, min(5, len(corpus)))
-            samples = '\n'.join([c.title + ' - ' + '\n'.join(c.paths) for c in samples])
-            logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
+            logger.info(f"Applied Zotero collection filters; selected {len(corpus)} references")
         return corpus
 
     # ------------------------------------------------------------------
@@ -500,7 +498,7 @@ class Executor:
                     "jif": (paper.journal_metrics or {}).get("jif"),
                     "innovation": paper.innovation_assessment,
                     "current_focus": bool(focus_evidence(paper, focus_mode)), "selected": False,
-                    "skip_reasons": ["target_already_filled"],
+                    "skip_reasons": ["not_processed"],
                 }
                 records[id(paper)] = record
                 selection.append(record)
@@ -531,6 +529,10 @@ class Executor:
                 record["selected"] = True
                 journal_counts[journal] = journal_counts.get(journal, 0) + 1
                 focus_count += int(focused)
+            if len(selected) >= max_paper_num:
+                for record in selection:
+                    if record["skip_reasons"] == ["not_processed"]:
+                        record["skip_reasons"] = ["target_already_filled"]
             if verify_related:
                 self._save_selection_audit(focus_mode, selection)
             reader_count = sum(p.reading_card is not None for p in attempted)
