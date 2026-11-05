@@ -59,7 +59,8 @@ def test_ten_complete_reports_keep_other_topics_and_separate_focus_basis(config,
     assert all(paper.recommendation_matches[0]["basis"] == "current_focus" for paper in focus)
     decisions = executor.selection_audit["selection"]
     assert sum(item["selected"] for item in decisions) == 10
-    assert any("focus_limit" in item["skip_reasons"] for item in decisions)
+    assert any("target_already_filled" in item["skip_reasons"] for item in decisions)
+    assert executor.focus_preference_relaxed is False
     exported = (tmp_path / "outputs" / "recommendation-audit-summary.json").read_text(encoding="utf-8")
     assert "pubmed.ncbi.nlm.nih.gov" not in exported
     assert "Anchor" not in exported and "candidate_quote" not in exported
@@ -78,6 +79,32 @@ def test_focus_candidates_do_not_use_up_other_topics_verification_budget(config,
     assert executor.run(send_mail=False) == 10
     assert len(verified) == 8
     assert all(not paper.title.startswith("UK Biobank") for paper in verified)
+
+
+def test_focus_preference_refills_to_ten_when_only_three_other_papers_qualify(config, monkeypatch, tmp_path):
+    executor, _ = prepare(config, monkeypatch, tmp_path, "ukb_multimorbidity")
+    papers=executor.retrievers['stub'].retrieve_papers()
+    executor.retrievers['stub'].retrieve_papers=lambda:papers[:11]
+    assert executor.run(send_mail=False)==10
+    assert sum(p.title.startswith('UK Biobank') for p in executor.last_papers)==7
+    assert executor.focus_preference_relaxed is True
+
+
+def test_failed_other_card_does_not_force_an_avoidable_shortfall(config, monkeypatch, tmp_path):
+    executor, _ = prepare(config, monkeypatch, tmp_path, "ukb_multimorbidity")
+    papers=executor.retrievers['stub'].retrieve_papers()
+    executor.retrievers['stub'].retrieve_papers=lambda:papers[:12]
+    calls=[]
+    def reader(paper,*args):
+        calls.append(paper.url)
+        if paper.title=='Other topic 8':
+            return
+        paper.abstract_zh='完整摘要译文'
+        paper.reading_card={'essence':['完整精读卡']}
+    monkeypatch.setattr('zotero_arxiv_daily.protocol.Paper.generate_tldr',reader)
+    assert executor.run(send_mail=False)==10
+    assert len(calls)==len(set(calls))
+    assert sum(p.title.startswith('UK Biobank') for p in executor.last_papers)==7
 
 
 def test_library_filter_logs_counts_without_private_titles_or_paths(monkeypatch):

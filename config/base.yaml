@@ -19,7 +19,8 @@ recommendations:
   require_cards: true # Do not send an email full of failed reading cards.
   innovation_enabled: true # Prioritize cognitive contributions using the course rubric.
   focus_mode: ukb_multimorbidity # Set balanced to restore Zotero-only topic coverage.
-  max_focus_papers: 6 # At least four of ten slots remain available for other topics.
+  focus_papers_target: 6 # Prefer six current-project papers and four other directions when available.
+  max_focus_papers: 9 # Fill shortfalls without allowing all ten to be the current topic.
   focus_until: null # Optional YYYY-MM-DD; restore balanced mode after this Shanghai date.
 
 source:
