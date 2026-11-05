@@ -53,7 +53,7 @@ jobs:
                   'executor.debug=false','executor.send_empty=true','executor.character_pool=[]',
                   'search.mode=5','source.mix_mode=1',
                   'recommendations.enabled=true','recommendations.innovation_enabled=true',
-                  'recommendations.max_papers=10','recommendations.max_per_journal=3','recommendations.max_focus_papers=6',
+                  'recommendations.max_papers=10','recommendations.max_per_journal=3','recommendations.focus_papers_target=6','recommendations.max_focus_papers=9',
                   'recommendations.publication_days=90','recommendations.candidate_limit=800',
                   'recommendations.verify_limit=120','recommendations.focus_mode=ukb_multimorbidity',
                   'source.pubmed.max_results=800','source.pubmed.public_index_fallback=true','executor.max_paper_num=10',
@@ -95,7 +95,7 @@ jobs:
               })
               assert summary['papers']==summary['complete_cards']==10
               assert summary['all_if_at_least10'] and summary['all_within90_days']
-              assert summary['max_per_journal']<=3 and focus<=6
+              assert summary['max_per_journal']<=3 and focus<=9 and summary['other_papers']>=1
               assert any((p.innovation_assessment or {}).get('type')!='uncertain' for p in papers)
           except Exception as error:
               summary['failure_type']=type(error).__name__

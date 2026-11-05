@@ -331,6 +331,7 @@ class Executor:
             "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
             "selection_candidates": len(selection),
             "selected_count": sum(item["selected"] for item in selection),
+            "focus_preference_relaxed": getattr(self, "focus_preference_relaxed", False),
             "skip_counts": dict(Counter(reason for item in selection for reason in item["skip_reasons"])),
             "selected_innovation_types": dict(Counter(
                 (item.get("innovation") or {}).get("type", "unclassified")
@@ -351,6 +352,7 @@ class Executor:
         verify_related = bool(recommendation_config.get("enabled", False)) and self._search_mode > 1
         focus_mode = effective_focus_mode(recommendation_config) if verify_related else "balanced"
         self.focus_mode = focus_mode
+        self.focus_preference_relaxed = False
         dynamic_jif = bool(journals_config.get("enabled", False)) and journals_config.get("mode") == "easyscholar"
         if dynamic_jif:
             service_config = journals_config.get("easyscholar", {})
@@ -492,7 +494,8 @@ class Executor:
             per_journal = int(recommendation_config.get("max_per_journal", 3))
             require_cards = bool(recommendation_config.get("require_cards", False))
             focus_count = 0
-            focus_limit = min(int(recommendation_config.get("max_focus_papers", 6)), max(0, max_paper_num - 1))
+            focus_hard_limit = min(int(recommendation_config.get("max_focus_papers", 9)), max(0, max_paper_num - 1))
+            focus_limit = min(int(recommendation_config.get("focus_papers_target", 6)), focus_hard_limit)
             selection = []
             records = {}
             for paper in reranked_papers:
@@ -508,33 +511,50 @@ class Executor:
             if verify_related:
                 self._save_selection_audit(focus_mode, selection)
             self.last_papers = attempted
-            for p in tqdm(reranked_papers):
+            preferred_focus_limit = focus_limit
+            self.focus_preference_relaxed = False
+            attempted_ids = set()
+            focus_pass_limits = [focus_limit]
+            if focus_mode == "ukb_multimorbidity" and focus_hard_limit > focus_limit:
+                focus_pass_limits.append(focus_hard_limit)
+            for pass_number, focus_limit in enumerate(focus_pass_limits):
                 if len(selected) >= max_paper_num:
                     break
-                journal = " ".join((p.journal or "").casefold().split())
-                is_focus = bool(focus_evidence(p, focus_mode))
-                record = records[id(p)]
-                record["skip_reasons"] = []
-                if verify_related and journal_counts.get(journal, 0) >= per_journal:
-                    record["skip_reasons"].append("journal_limit")
-                if is_focus and focus_count >= focus_limit:
-                    record["skip_reasons"].append("focus_limit")
-                if record["skip_reasons"]:
-                    continue
-                attempted.append(p)
-                logger.info(f"Reading candidate {len(attempted)}; completed {len(selected)}/{max_paper_num}: {p.url}")
-                p.generate_tldr(self.openai_client, self.config.llm)
-                if p.reading_card is None and require_cards:
-                    record["skip_reasons"].append("reading_card_failed")
-                    continue
-                p.generate_title_translation(self.openai_client, self.config.llm)
-                selected.append(p)
-                record["selected"] = True
-                journal_counts[journal] = journal_counts.get(journal, 0) + 1
-                focus_count += int(is_focus)
+                # Refill a topic shortfall only after another direction has
+                # produced a complete card; never retry an already-read paper.
+                if pass_number and not any(not focus_evidence(paper, focus_mode) for paper in selected):
+                    break
+                for p in tqdm(reranked_papers):
+                    if id(p) in attempted_ids:
+                        continue
+                    if len(selected) >= max_paper_num:
+                        break
+                    journal = " ".join((p.journal or "").casefold().split())
+                    is_focus = bool(focus_evidence(p, focus_mode))
+                    record = records[id(p)]
+                    record["skip_reasons"] = []
+                    if verify_related and journal_counts.get(journal, 0) >= per_journal:
+                        record["skip_reasons"].append("journal_limit")
+                    if is_focus and focus_count >= focus_limit:
+                        record["skip_reasons"].append("focus_limit")
+                    if record["skip_reasons"]:
+                        continue
+                    attempted.append(p)
+                    attempted_ids.add(id(p))
+                    logger.info(f"Reading candidate {len(attempted)}; completed {len(selected)}/{max_paper_num}: {p.url}")
+                    p.generate_tldr(self.openai_client, self.config.llm)
+                    if p.reading_card is None and require_cards:
+                        record["skip_reasons"].append("reading_card_failed")
+                        continue
+                    p.generate_title_translation(self.openai_client, self.config.llm)
+                    selected.append(p)
+                    record["selected"] = True
+                    journal_counts[journal] = journal_counts.get(journal, 0) + 1
+                    focus_count += int(is_focus)
+            self.focus_preference_relaxed = focus_count > preferred_focus_limit
             if len(selected) >= max_paper_num:
                 for record in selection:
-                    if record["skip_reasons"] == ["not_processed"]:
+                    if record["skip_reasons"] in (["not_processed"], ["focus_limit"]):
                         record["skip_reasons"] = ["target_already_filled"]
             if verify_related:
                 self._save_selection_audit(focus_mode, selection)
