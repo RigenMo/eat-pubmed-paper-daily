@@ -63,13 +63,40 @@ jobs:
           client=OpenAI(api_key=config.llm.api.key,base_url=config.llm.api.base_url,timeout=600,max_retries=1)
           summary={'mail_sent':False,'privacy':'aggregate counts only','failure_type':None}
           executor=None
-          stage='public_classifier'
+          stage='provider_health'
+          def safe_model_error(error):
+              text=str(error).casefold()
+              status=getattr(error,'status_code',None)
+              if any(word in text for word in ('insufficient_quota','insufficient quota','insufficient user quota','balance','额度不足','余额不足')):
+                  category='quota_or_balance'
+              elif status==429:
+                  category='rate_limit'
+              elif status in (401,403):
+                  category='authentication_or_access'
+              elif 'context_length' in text or 'context length' in text:
+                  category='context_limit'
+              elif status and status>=500:
+                  category='provider_server'
+              else:
+                  category='other'
+              return {'type':type(error).__name__,'http_status':status,'category':category}
           try:
+              with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                  client.chat.completions.create(model='kimi-k3',max_tokens=65536,timeout=60,messages=[{'role':'user','content':'只回复OK。'}])
+              summary['provider_health_ok']=True
               summary['public_classifier_validation_run']=41972735889
               with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
                   stage='initialize_executor'
                   executor=Executor(config)
                   stage='pipeline'
+                  model_original=executor.openai_client.chat.completions.create
+                  def observed_model(*args,**kwargs):
+                      try:
+                          return model_original(*args,**kwargs)
+                      except Exception as error:
+                          summary.setdefault('model_errors',[]).append(safe_model_error(error))
+                          raise
+                  executor.openai_client.chat.completions.create=observed_model
                   for source,retriever_instance in executor.retrievers.items():
                       original=retriever_instance.retrieve_papers
                       def observed(original=original,source=source):
@@ -99,6 +126,7 @@ jobs:
               assert any((p.innovation_assessment or {}).get('type')!='uncertain' for p in papers)
           except Exception as error:
               summary['failure_type']=type(error).__name__
+              if stage=='provider_health': summary['provider_health_error']=safe_model_error(error)
               summary['stage']=stage
               summary['error_frames']=[{'file':Path(frame.filename).name,'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(error.__traceback__)]
               summary['selection_counts']=getattr(executor,'selection_audit_summary',{})
