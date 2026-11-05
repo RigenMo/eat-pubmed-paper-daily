@@ -511,7 +511,7 @@ def _build_recommendation_html(matches: Any) -> str:
 def _build_innovation_html(assessment: Any) -> str:
     if not isinstance(assessment, Mapping):
         return ""
-    kind = assessment.get("type")
+    kind = _text_value(assessment.get("type")).strip()
     labels = {
         "cognitive": [("认知差", "#6d28d9", "#ede9fe")],
         "capability": [("能力差", "#1d4ed8", "#dbeafe")],

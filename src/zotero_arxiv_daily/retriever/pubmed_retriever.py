@@ -15,6 +15,11 @@ _EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _RATE_SLEEP = 0.34  # ≤3 requests/second without API key
 _SHANGHAI = timezone(timedelta(hours=8))
 
+
+class PubMedSearchResponseError(RuntimeError):
+    def __init__(self):
+        super().__init__("Invalid PubMed search response")
+
 _MONTH_NUMBERS = {
     "jan": "01",
     "january": "01",
@@ -581,8 +586,26 @@ class PubMedRetriever(BaseRetriever):
         }
         sleep(_RATE_SLEEP)
         resp = _ncbi_get(_ESEARCH_URL, params)
-        data = resp.json()
-        pmids = data.get("esearchresult", {}).get("idlist", [])
+        try:
+            data = resp.json()
+        except ValueError:
+            raise PubMedSearchResponseError() from None
+        if not isinstance(data, dict) or not isinstance(data.get("esearchresult"), dict):
+            raise PubMedSearchResponseError()
+        search_result = data["esearchresult"]
+        pmids = search_result.get("idlist")
+        if not isinstance(pmids, list) or any(
+            isinstance(pmid, bool) or not isinstance(pmid, (str, int)) or not re.fullmatch(r"[0-9]+", str(pmid))
+            for pmid in pmids
+        ):
+            raise PubMedSearchResponseError()
+        pmids = [str(pmid) for pmid in pmids]
+        if "count" in search_result:
+            count = search_result["count"]
+            if isinstance(count, bool) or not isinstance(count, (int, str)) or not re.fullmatch(r"[0-9]+", str(count)):
+                raise PubMedSearchResponseError()
+            if int(count) > 0 and not pmids and self._max_results > 0:
+                raise PubMedSearchResponseError()
         return pmids
 
     def _fetch_pmids_with_limit(self, query: str, limit: int) -> list[str]:
@@ -736,6 +759,12 @@ class PubMedRetriever(BaseRetriever):
                     self.retrieval_audit["requested_ids"] = used
                     try:
                         result = self._fetch_pmids_with_limit(query, limit)
+                    except PubMedSearchResponseError as exc:
+                        last_server_error = exc
+                        self.retrieval_audit["failed_queries"].append({"query_index": index + 1, "error_type": "invalid_search_response"})
+                        round_calls.append({"query_index": index + 1, "requested": limit, "returned": 0})
+                        logger.warning(f"PubMed theme {index + 1} returned an invalid search response")
+                        continue
                     except requests.HTTPError as exc:
                         status = exc.response.status_code if exc.response is not None else None
                         if status is None or not 500 <= status <= 599:

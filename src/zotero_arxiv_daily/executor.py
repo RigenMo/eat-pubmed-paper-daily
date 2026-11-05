@@ -585,8 +585,7 @@ class Executor:
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),
                 "papers": [
                     {"url": p.url, "journal": p.journal, "publication_date": p.publication_date,
-                     "jif": (p.journal_metrics or {}).get("jif"),
-                     "innovation_type": (p.innovation_assessment or {}).get("type")}
+                     "jif": (p.journal_metrics or {}).get("jif")}
                     for p in reranked_papers
                 ],
             }

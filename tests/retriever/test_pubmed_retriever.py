@@ -682,3 +682,64 @@ def test_theme_client_error_is_not_swallowed(config, monkeypatch):
     with pytest.raises(requests.HTTPError):
         retriever._retrieve_raw_papers()
     assert retriever.retrieval_audit["requested_ids"] == 3
+
+@pytest.mark.parametrize("payload", [
+    {}, [], {"esearchresult": None}, {"esearchresult": {}},
+    {"esearchresult": {"idlist": ["secret"]}},
+    {"esearchresult": {"idlist": [], "count": "1"}},
+    {"esearchresult": {"idlist": [], "count": "-1"}},
+])
+def test_invalid_search_response_is_not_zero(config, monkeypatch, payload):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=lambda: payload))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    with pytest.raises(module.PubMedSearchResponseError, match="^Invalid PubMed search response$"):
+        PubMedRetriever(config)._fetch_pmids("private")
+
+
+def test_invalid_search_json_is_safe(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    def bad_json():
+        raise ValueError("private response")
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=bad_json))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    with pytest.raises(module.PubMedSearchResponseError, match="^Invalid PubMed search response$"):
+        PubMedRetriever(config)._fetch_pmids("private")
+
+
+def test_search_real_zero_is_valid(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    monkeypatch.setattr(module, "_ncbi_get", lambda *args: SimpleNamespace(json=lambda: {"esearchresult": {"idlist": [], "count": "0"}}))
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    assert PubMedRetriever(config)._fetch_pmids("private") == []
+
+
+def test_invalid_theme_does_not_block_valid_theme(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    def fetch(self, query, limit):
+        if "first" in query:
+            raise module.PubMedSearchResponseError()
+        return ["7"]
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fetch)
+    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today} for i in ids])
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    assert [p["PMID"] for p in retriever._retrieve_raw_papers()] == ["7"]
+    assert retriever.retrieval_audit["failed_queries"] == [{"query_index": 1, "error_type": "invalid_search_response"}]
+    assert retriever.retrieval_audit["requested_ids"] == 6
+
+
+def test_all_invalid_themes_raise(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    def fail(*args):
+        raise module.PubMedSearchResponseError()
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", fail)
+    retriever = PubMedRetriever(config)
+    retriever.set_max_results(6)
+    retriever.set_pubmed_queries(["first", "second"])
+    with pytest.raises(module.PubMedSearchResponseError):
+        retriever._retrieve_raw_papers()
+    assert retriever.retrieval_audit["successful_queries"] == 0
+    assert len(retriever.retrieval_audit["failed_queries"]) == 2
