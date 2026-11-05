@@ -25,6 +25,7 @@ jobs:
           import io
           import json
           import logging
+          import traceback
           import os
           from collections import Counter
           from datetime import datetime,timedelta,timezone
@@ -48,6 +49,7 @@ jobs:
                   'llm.api.base_url=https://llm.goaichat.top/v1',
                   'llm.api.timeout=600','llm.api.max_retries=1',
                   'llm.generation_kwargs.model=kimi-k3','llm.generation_kwargs.max_tokens=65536','llm.max_input_tokens=1000000',
+                  'zotero.user_id=${oc.env:ZOTERO_ID}','zotero.api_key=${oc.env:ZOTERO_KEY}',
                   'executor.debug=false','executor.send_empty=true','executor.character_pool=[]',
                   'search.mode=5','source.mix_mode=1',
                   'recommendations.enabled=true','recommendations.innovation_enabled=true',
@@ -60,6 +62,8 @@ jobs:
               ])
           client=OpenAI(api_key=config.llm.api.key,base_url=config.llm.api.base_url,timeout=600,max_retries=1)
           summary={'mail_sent':False,'privacy':'aggregate counts only','failure_type':None}
+          executor=None
+          stage='public_classifier'
           try:
               # Public, fixed fixtures unrelated to the private library selection.
               with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
@@ -72,7 +76,18 @@ jobs:
               assert len(public)==2 and any(paper.innovation_assessment['type']!='uncertain' for paper in public)
               print('PUBLIC_CLASSIFIER',json.dumps(summary['public_classifier_types']))
               with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                  stage='initialize_executor'
                   executor=Executor(config)
+                  stage='pipeline'
+                  for source,retriever_instance in executor.retrievers.items():
+                      original=retriever_instance.retrieve_papers
+                      def observed(original=original,source=source):
+                          try:
+                              return original()
+                          except Exception as error:
+                              summary.setdefault('retriever_errors',{})[source]={'type':type(error).__name__,'http_status':getattr(getattr(error,'response',None),'status_code',None),'frames':[{'file':Path(frame.filename).name,'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(error.__traceback__)]}
+                              raise
+                      retriever_instance.retrieve_papers=observed
                   count=executor.run(send_mail=False)
               papers=executor.last_papers
               today=datetime.now(timezone(timedelta(hours=8))).date()
@@ -93,6 +108,10 @@ jobs:
               assert any((p.innovation_assessment or {}).get('type')!='uncertain' for p in papers)
           except Exception as error:
               summary['failure_type']=type(error).__name__
+              summary['stage']=stage
+              summary['error_frames']=[{'file':Path(frame.filename).name,'function':frame.name,'line':frame.lineno} for frame in traceback.extract_tb(error.__traceback__)]
+              summary['selection_counts']=getattr(executor,'selection_audit_summary',{})
+              summary['attempted_card_status_counts']=dict(Counter((getattr(p,'reader_status',None) or 'unknown') for p in getattr(executor,'last_papers',[])))
               out.write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
               print('PRIVATE_PREFLIGHT_AGGREGATE',json.dumps(summary,ensure_ascii=False))
               raise RuntimeError('Privacy-safe preflight failed: '+type(error).__name__) from None
