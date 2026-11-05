@@ -11,12 +11,16 @@ search:
 recommendations:
   enabled: true # Verify each candidate against actual Zotero evidence before recommendation.
   publication_days: 90 # Newest first; backfill from the last 90 days when recent eligible cards are insufficient.
-  candidate_limit: 400 # Wider automatic search coverage for five complete recommendations.
-  verify_limit: 60 # Check more IF-eligible candidates before declaring a shortfall.
+  candidate_limit: 800 # Wider coverage for ten complete, diverse recommendations.
+  verify_limit: 120 # Verify eligibility before spending time on full reading cards.
   batch_size: 5
-  max_papers: 5 # Target five complete cards; disclose a shortfall without weakening eligibility.
-  max_per_journal: 3 # Keep the five-paper digest spread across multiple journals.
+  max_papers: 10 # Target ten complete cards; never invent papers to hide a shortfall.
+  max_per_journal: 3 # Keep the digest spread across journals.
   require_cards: true # Do not send an email full of failed reading cards.
+  innovation_enabled: true # Prioritize cognitive contributions using the course rubric.
+  focus_mode: ukb_multimorbidity # Set balanced to restore Zotero-only topic coverage.
+  max_focus_papers: 6 # At least four of ten slots remain available for other topics.
+  focus_until: null # Optional YYYY-MM-DD; restore balanced mode after this Shanghai date.
 
 source:
   mix_mode: 5 # Source mix dial. 1=PubMed only, 2=more PubMed/less arXiv, 3=equal, 4=less PubMed/more arXiv, 5=arXiv only. Example: 3
@@ -28,7 +32,8 @@ source:
   medrxiv:
     category: null # The categories of target medrxiv papers. Find categories from [here](https://www.medrxiv.org/) Example: ["psychiatry and clinical psychology", "neurology"]
   pubmed:
-    max_results: 400 # Candidate pool; automatic recommendation mode uses this independently of delivery count.
+    max_results: 800 # Candidate pool; automatic recommendation mode uses this independently of delivery count.
+    public_index_fallback: true # Public dates/topics only; never send Zotero terms to another index.
 
 email:
   sender: ??? # The email account of the SMTP server that sends you email. Example: abc@qq.com

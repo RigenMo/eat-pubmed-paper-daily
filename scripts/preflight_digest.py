@@ -50,8 +50,8 @@ def main(config: DictConfig):
             failure = error
         papers = getattr(executor, "last_papers", [])
         html = getattr(executor, "last_email_content", render_email(papers))
-        audit = getattr(executor, "recommendation_audit", [])
-        (output / "selection-audit.json").write_text(
+        audit = getattr(executor, "selection_audit_summary", {})
+        (output / "selection-summary.json").write_text(
             json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
@@ -69,20 +69,27 @@ def main(config: DictConfig):
             "reader_status": paper.reader_status,
             "card_characters": len(Paper._format_reading_card(paper.reading_card)) if paper.reading_card else None,
             "recommendation_matches": paper.recommendation_matches,
+            "innovation_assessment": paper.innovation_assessment,
         })
-    (output / "index.html").write_text(html, encoding="utf-8")
-    reports = OmegaConf.to_container(OmegaConf.create(reports), resolve=True)
-    (output / "reports.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
+    reports = OmegaConf.to_container(OmegaConf.create(reports), resolve=False)
+    # Automatic recommendations depend on a private library. Only aggregate
+    # acceptance results may leave the runner; the reader fixture is public.
+    if mode == "reader":
+        (output / "index.html").write_text(html, encoding="utf-8")
+        (output / "reports.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {
         "mode": mode, "papers": len(papers),
         "complete_cards": sum(paper.reading_card is not None for paper in papers),
-        "journals": dict(Counter(paper.journal for paper in papers)),
+        "journal_count": len(Counter(paper.journal for paper in papers)),
+        "max_per_journal": max(Counter(paper.journal for paper in papers).values(), default=0),
         "mail_sent": False,
+        "innovation_types": dict(Counter((paper.innovation_assessment or {}).get("type", "unclassified") for paper in papers)),
         "failure_type": type(failure).__name__ if failure else None,
     }
+    (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("PREFLIGHT_RESULT " + json.dumps(summary, ensure_ascii=False))
     if failure is not None:
-        raise failure
+        raise RuntimeError(f"Preflight failed: {type(failure).__name__}") from None
     if mode == "automatic" and not summary["complete_cards"]:
         raise RuntimeError("No complete qualifying recommendation; positive end-to-end validation is incomplete")
     if mode == "reader" and summary["complete_cards"] != 2:
@@ -91,4 +98,3 @@ def main(config: DictConfig):
 
 if __name__ == "__main__":
     main()
-

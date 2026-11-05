@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from loguru import logger
 from pyzotero import zotero
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -18,6 +19,8 @@ from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .journal_metrics import enrich_journal_metrics
 from .recommendations import build_zotero_queries, verify_recommendations
+from .innovation import assess_innovation
+from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
@@ -240,7 +243,7 @@ class Executor:
 
     def filter_corpus(self, corpus: list[CorpusPaper]) -> list[CorpusPaper]:
         if self.include_path_patterns:
-            logger.info(f"Selecting zotero papers matching include_path: {self.include_path_patterns}")
+            logger.info("Applying Zotero collection inclusion rules")
             corpus = [
                 c for c in corpus
                 if any(
@@ -250,7 +253,7 @@ class Executor:
                 )
             ]
         if self.ignore_path_patterns:
-            logger.info(f"Excluding zotero papers matching ignore_path: {self.ignore_path_patterns}")
+            logger.info("Applying Zotero collection exclusion rules")
             corpus = [
                 c for c in corpus
                 if not any(
@@ -260,9 +263,7 @@ class Executor:
                 )
             ]
         if self.include_path_patterns or self.ignore_path_patterns:
-            samples = random.sample(corpus, min(5, len(corpus)))
-            samples = '\n'.join([c.title + ' - ' + '\n'.join(c.paths) for c in samples])
-            logger.info(f"Selected {len(corpus)} zotero papers:\n{samples}\n...")
+            logger.info(f"Applied Zotero collection filters; selected {len(corpus)} references")
         return corpus
 
     # ------------------------------------------------------------------
@@ -315,10 +316,41 @@ class Executor:
     # Main pipeline
     # ------------------------------------------------------------------
 
+    def _save_selection_audit(self, mode, selection):
+        """Keep public-candidate decisions, never credentials or raw Zotero records."""
+        audit = {
+            "schema_version": 1, "focus_mode": mode,
+            "retrieval": getattr(self.retrievers.get("pubmed"), "retrieval_audit", None),
+            "relevance": getattr(self, "recommendation_audit", []), "selection": selection,
+        }
+        self.selection_audit = audit
+        summary = {
+            "schema_version": 1, "focus_mode": mode, "retrieval": audit["retrieval"],
+            "relevance_checked": len(audit["relevance"]),
+            "relevance_rejected": sum(not item.get("related", False) for item in audit["relevance"]),
+            "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
+            "selection_candidates": len(selection),
+            "selected_count": sum(item["selected"] for item in selection),
+            "skip_counts": dict(Counter(reason for item in selection for reason in item["skip_reasons"])),
+            "selected_innovation_types": dict(Counter(
+                (item.get("innovation") or {}).get("type", "unclassified")
+                for item in selection if item["selected"]
+            )),
+        }
+        self.selection_audit_summary = summary
+        try:
+            path = Path("outputs/recommendation-audit-summary.json")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            logger.warning("Could not persist recommendation audit")
+
     def run(self, send_mail: bool = True):
         journals_config = self.config.get("journals", {})
         recommendation_config = self.config.get("recommendations", {})
         verify_related = bool(recommendation_config.get("enabled", False)) and self._search_mode > 1
+        focus_mode = effective_focus_mode(recommendation_config) if verify_related else "balanced"
+        self.focus_mode = focus_mode
         dynamic_jif = bool(journals_config.get("enabled", False)) and journals_config.get("mode") == "easyscholar"
         if dynamic_jif:
             service_config = journals_config.get("easyscholar", {})
@@ -345,8 +377,9 @@ class Executor:
             queries = build_zotero_queries(
                 corpus, openai_client=self.openai_client, llm_params=self.config.llm
             )
+            queries = list(dict.fromkeys(focus_queries(focus_mode) + queries))
             self.retrievers["pubmed"].set_pubmed_queries(queries)
-            logger.info(f"Automatic Zotero retrieval: {len(corpus)} references, {len(queries)} distinct source-derived queries")
+            logger.info(f"Automatic retrieval: {len(corpus)} references, {len(queries)} Zotero/current-focus queries")
 
         # Step 3: retrieve papers from all sources (in parallel)
         all_papers = []
@@ -409,24 +442,46 @@ class Executor:
                 favorite_journals=fav_journals,
             )
             if verify_related:
-                candidate_limit = int(recommendation_config.get("candidate_limit", 400))
+                candidate_limit = int(recommendation_config.get("candidate_limit", 800))
                 reranked_papers = reranked_papers[:candidate_limit]
 
             if verify_related:
                 # Relevance and IF are eligibility gates. Among eligible
                 # candidates, prioritize actual first publication, not indexing.
                 reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
-                verify_limit = int(recommendation_config.get("verify_limit", 60))
+                verify_limit = int(recommendation_config.get("verify_limit", 120))
                 self.recommendation_audit = []
-                reranked_papers = verify_recommendations(
-                    reranked_papers[:verify_limit], self.openai_client, self.config.llm,
+                candidates = reranked_papers
+                focus_candidates = []
+                library_candidates = []
+                for paper in candidates:
+                    evidence = focus_evidence(paper, focus_mode)
+                    if evidence:
+                        if len(focus_candidates) >= max(1, verify_limit // 2):
+                            continue
+                        paper.recommendation_matches = [evidence]
+                        focus_candidates.append(paper)
+                        self.recommendation_audit.append({
+                            "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
+                            "jif": (paper.journal_metrics or {}).get("jif"), "related": True,
+                            "basis": "current_focus", "reason": evidence["reason"],
+                        })
+                    else:
+                        library_candidates.append(paper)
+                library_candidates = library_candidates[:verify_limit]
+                verified_library = verify_recommendations(
+                    library_candidates, self.openai_client, self.config.llm,
                     batch_size=int(recommendation_config.get("batch_size", 5)),
                     audit=self.recommendation_audit,
                 )
+                reranked_papers = focus_candidates + verified_library
+                if recommendation_config.get("innovation_enabled", True):
+                    assess_innovation(reranked_papers, self.openai_client, self.config.llm)
+                reranked_papers = order_candidates(reranked_papers, focus_mode)
 
             max_paper_num = int(self.config.executor.max_paper_num)
             if verify_related:
-                max_paper_num = min(max_paper_num, int(recommendation_config.get("max_papers", 5)))
+                max_paper_num = min(max_paper_num, int(recommendation_config.get("max_papers", 10)))
             if self.config.executor.debug:
                 max_paper_num = min(max_paper_num, 5)
             # Step 5: generate translated abstracts, reading cards and title translations
@@ -436,21 +491,53 @@ class Executor:
             journal_counts = {}
             per_journal = int(recommendation_config.get("max_per_journal", 3))
             require_cards = bool(recommendation_config.get("require_cards", False))
+            focus_count = 0
+            focus_limit = min(int(recommendation_config.get("max_focus_papers", 6)), max(0, max_paper_num - 1))
+            selection = []
+            records = {}
+            for paper in reranked_papers:
+                record = {
+                    "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
+                    "jif": (paper.journal_metrics or {}).get("jif"),
+                    "innovation": paper.innovation_assessment,
+                    "current_focus": bool(focus_evidence(paper, focus_mode)), "selected": False,
+                    "skip_reasons": ["not_processed"],
+                }
+                records[id(paper)] = record
+                selection.append(record)
+            if verify_related:
+                self._save_selection_audit(focus_mode, selection)
             self.last_papers = attempted
             for p in tqdm(reranked_papers):
                 if len(selected) >= max_paper_num:
                     break
                 journal = " ".join((p.journal or "").casefold().split())
+                is_focus = bool(focus_evidence(p, focus_mode))
+                record = records[id(p)]
+                record["skip_reasons"] = []
                 if verify_related and journal_counts.get(journal, 0) >= per_journal:
+                    record["skip_reasons"].append("journal_limit")
+                if is_focus and focus_count >= focus_limit:
+                    record["skip_reasons"].append("focus_limit")
+                if record["skip_reasons"]:
                     continue
                 attempted.append(p)
                 logger.info(f"Reading candidate {len(attempted)}; completed {len(selected)}/{max_paper_num}: {p.url}")
                 p.generate_tldr(self.openai_client, self.config.llm)
                 if p.reading_card is None and require_cards:
+                    record["skip_reasons"].append("reading_card_failed")
                     continue
                 p.generate_title_translation(self.openai_client, self.config.llm)
                 selected.append(p)
+                record["selected"] = True
                 journal_counts[journal] = journal_counts.get(journal, 0) + 1
+                focus_count += int(is_focus)
+            if len(selected) >= max_paper_num:
+                for record in selection:
+                    if record["skip_reasons"] == ["not_processed"]:
+                        record["skip_reasons"] = ["target_already_filled"]
+            if verify_related:
+                self._save_selection_audit(focus_mode, selection)
             reader_count = sum(p.reading_card is not None for p in attempted)
             logger.info(
                 f"Reading cards generated: {reader_count}/{len(attempted)}; "
@@ -486,7 +573,7 @@ class Executor:
         # turn that successful send into a retryable SMTP failure.
         try:
             confirmed_at = datetime.now(timezone.utc)
-            expected = int(recommendation_config.get("max_papers", 5))
+            expected = int(recommendation_config.get("max_papers", 10))
             complete = sum(bool(p.reading_card) and bool(p.abstract_zh) for p in reranked_papers)
             receipt = {
                 "schema_version": 1,

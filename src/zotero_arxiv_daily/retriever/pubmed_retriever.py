@@ -8,12 +8,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from loguru import logger
 from .base import BaseRetriever, register_retriever
+from .public_index import search_public_index
 from ..protocol import Paper
+from ..reading_preferences import effective_focus_mode
 
 _ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 _EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 _RATE_SLEEP = 0.34  # ≤3 requests/second without API key
 _SHANGHAI = timezone(timedelta(hours=8))
+
+
+class PubMedSearchResponseError(RuntimeError):
+    def __init__(self):
+        super().__init__("Invalid PubMed search response")
 
 _MONTH_NUMBERS = {
     "jan": "01",
@@ -104,7 +111,7 @@ def _ncbi_get(url: str, params: dict[str, Any], retries: int = 5) -> requests.Re
         except Exception as exc:
             if attempt == retries - 1:
                 raise
-            logger.warning(f"NCBI request failed ({exc}), retry {attempt + 1}/{retries}")
+            logger.warning(f"NCBI request failed, retry {attempt + 1}/{retries}")
             sleep(10)
 
 
@@ -463,6 +470,7 @@ class PubMedRetriever(BaseRetriever):
         self._pubmed_broad_query: str | None = None  # broad query (single OR group)
         self._pubmed_queries: list[str] = []          # corpus/theme queries for mode 5
         self._pubmed_queries_configured = False
+        self.retrieval_audit = {}
         self._max_results: int = int(self.retriever_config.get("max_results", 200))
         recommendation_config = config.get("recommendations", {})
         self._publication_days = int(config.executor.get("retrieval_days", 1))
@@ -580,8 +588,26 @@ class PubMedRetriever(BaseRetriever):
         }
         sleep(_RATE_SLEEP)
         resp = _ncbi_get(_ESEARCH_URL, params)
-        data = resp.json()
-        pmids = data.get("esearchresult", {}).get("idlist", [])
+        try:
+            data = resp.json()
+        except ValueError:
+            raise PubMedSearchResponseError() from None
+        if not isinstance(data, dict) or not isinstance(data.get("esearchresult"), dict):
+            raise PubMedSearchResponseError()
+        search_result = data["esearchresult"]
+        pmids = search_result.get("idlist")
+        if not isinstance(pmids, list) or any(
+            isinstance(pmid, bool) or not isinstance(pmid, (str, int)) or not re.fullmatch(r"[0-9]+", str(pmid))
+            for pmid in pmids
+        ):
+            raise PubMedSearchResponseError()
+        pmids = [str(pmid) for pmid in pmids]
+        if "count" in search_result:
+            count = search_result["count"]
+            if isinstance(count, bool) or not isinstance(count, (int, str)) or not re.fullmatch(r"[0-9]+", str(count)):
+                raise PubMedSearchResponseError()
+            if int(count) > 0 and not pmids and self._max_results > 0:
+                raise PubMedSearchResponseError()
         return pmids
 
     def _fetch_pmids_with_limit(self, query: str, limit: int) -> list[str]:
@@ -652,6 +678,7 @@ class PubMedRetriever(BaseRetriever):
 
     def _retrieve_raw_papers(self) -> list[dict[str, Any]]:
         """Progressive fallback across query levels, escalating only when results < _MIN_RESULTS."""
+        self.retrieval_audit = {}
         today = datetime.now(_SHANGHAI).date()
         date_filter = self._date_filter(today)
         min_n = self._MIN_RESULTS
@@ -686,42 +713,139 @@ class PubMedRetriever(BaseRetriever):
                 logger.warning("PubMed: no valid corpus/theme queries were configured")
                 return []
 
-            per_query_limit = max(
-                1,
-                (self._max_results + len(self._pubmed_queries) - 1) // len(self._pubmed_queries),
+            fallback_enabled = (
+                int(self.config.search.mode) == 5
+                and bool(self.config.get("recommendations", {}).get("enabled", False))
+                and bool(self.retriever_config.get("public_index_fallback", False))
             )
-            query_results: list[list[str]] = []
-            for index, theme_query in enumerate(self._pubmed_queries, start=1):
-                query = f"({theme_query}) AND {date_filter}"
-                result = self._fetch_pmids_with_limit(query, per_query_limit)
-                logger.info(
-                    f"PubMed [theme {index}/{len(self._pubmed_queries)}] → "
-                    f"{len(result)} result(s)"
-                )
-                query_results.append(result)
+            count = len(self._pubmed_queries)
+            per_query_limit = max(1, (self._max_results + count - 1) // count)
+            budget = 2 * self._max_results
+            used = 0
+            query_results = [[] for _ in range(count)]
+            limits = [0] * count
+            eligible = list(range(count))
+            records_by_id = {}
+            queried_ids = set()
+            rounds = []
+            selected = []
+            unique_count = 0
+            last_server_error = None
+            self.retrieval_audit = {
+                "rounds": rounds,
+                "unique_count": 0,
+                "after_date_filter_count": 0,
+                "requested_id_budget": budget,
+                "requested_ids": 0,
+                "round_limit_reached": False,
+                "budget_exhausted": False,
+                "failed_queries": [],
+                "successful_queries": 0,
+            }
 
-            # Round-robin de-duplication retains coverage across themes while
-            # keeping the configured total candidate limit.
-            selected: list[str] = []
-            seen_pmids: set[str] = set()
-            for offset in range(max((len(result) for result in query_results), default=0)):
-                for result in query_results:
-                    if offset >= len(result):
+            for round_index in range(3):
+                round_calls = []
+                rounds.append(round_calls)
+                candidates = eligible
+                if round_index:
+                    # A deeper prefix repeats earlier IDs, so spend the remaining
+                    # budget on a subset rather than refetching every old prefix.
+                    eligible = eligible[:max(1, len(eligible) // 2)]
+                next_eligible = candidates[len(eligible):]
+                for position, index in enumerate(eligible):
+                    remaining = budget - used
+                    if round_index == 0:
+                        limit = min(per_query_limit, remaining)
+                    else:
+                        share = remaining // (len(eligible) - position)
+                        limit = min(limits[index] * 2, share)
+                    if limit <= limits[index] or limit <= 0:
                         continue
-                    pmid = str(result[offset])
-                    if pmid in seen_pmids:
+                    query = f"({self._pubmed_queries[index]}) AND {date_filter}"
+                    used += limit  # Count full requested prefixes, including failures and repeats.
+                    self.retrieval_audit["requested_ids"] = used
+                    try:
+                        result = self._fetch_pmids_with_limit(query, limit)
+                    except PubMedSearchResponseError as exc:
+                        last_server_error = exc
+                        self.retrieval_audit["failed_queries"].append({"query_index": index + 1, "error_type": "invalid_search_response"})
+                        round_calls.append({"query_index": index + 1, "requested": limit, "returned": 0})
+                        logger.warning(f"PubMed theme {index + 1} returned an invalid search response")
+                        if fallback_enabled and not self.retrieval_audit["successful_queries"] and len(self.retrieval_audit["failed_queries"]) >= 3:
+                            self.retrieval_audit["early_public_failover"] = True
+                            break
                         continue
-                    seen_pmids.add(pmid)
-                    selected.append(pmid)
-                    if len(selected) >= self._max_results:
-                        break
-                if len(selected) >= self._max_results:
+                    except requests.HTTPError as exc:
+                        status = exc.response.status_code if exc.response is not None else None
+                        if status is None or not 500 <= status <= 599:
+                            raise
+                        last_server_error = exc
+                        self.retrieval_audit["failed_queries"].append({"query_index": index + 1, "http_status": status})
+                        round_calls.append({"query_index": index + 1, "requested": limit, "returned": 0})
+                        logger.warning(f"PubMed theme {index + 1} returned HTTP {status} after retries")
+                        if fallback_enabled and not self.retrieval_audit["successful_queries"] and len(self.retrieval_audit["failed_queries"]) >= 3:
+                            self.retrieval_audit["early_public_failover"] = True
+                            break
+                        continue
+                    self.retrieval_audit["successful_queries"] += 1
+                    limits[index] = limit
+                    query_results[index] = result
+                    round_calls.append({"query_index": index + 1, "requested": limit, "returned": len(result)})
+                    if len(result) >= limit:
+                        next_eligible.append(index)
+                if not round_calls:
+                    rounds.pop()
+                    break
+                if not self.retrieval_audit["successful_queries"] and last_server_error is not None:
+                    if not fallback_enabled:
+                        raise last_server_error
                     break
 
-            if not selected:
-                logger.warning("PubMed: no results found for corpus/theme queries")
-                return []
-            return _recent_results(selected)
+                # Interleave the prefixes before fetching only unseen records.
+                ordered = []
+                seen = set()
+                for offset in range(max((len(result) for result in query_results), default=0)):
+                    for result in query_results:
+                        if offset < len(result):
+                            pmid = str(result[offset])
+                            if pmid not in seen:
+                                seen.add(pmid)
+                                ordered.append(pmid)
+                unique_count = len(ordered)
+                self.retrieval_audit["unique_count"] = unique_count
+                new_ids = [pmid for pmid in ordered if pmid not in queried_ids]
+                if new_ids:
+                    for record in _recent_results(new_ids):
+                        if record.get("PMID") is not None:
+                            records_by_id[str(record["PMID"])] = record
+                    queried_ids.update(new_ids)
+                selected = [records_by_id[pmid] for pmid in ordered if pmid in records_by_id]
+                self.retrieval_audit["after_date_filter_count"] = len(selected)
+                if len(selected) >= self._max_results or not next_eligible:
+                    break
+                eligible = next_eligible
+
+            self.retrieval_audit.update({
+                "rounds": rounds,
+                "unique_count": unique_count,
+                "after_date_filter_count": len(selected),
+                "requested_id_budget": budget,
+                "requested_ids": used,
+                "round_limit_reached": len(rounds) >= 3 and len(selected) < self._max_results and bool(next_eligible),
+                "budget_exhausted": len(selected) < self._max_results and bool(next_eligible) and (
+                    used >= budget or all(budget - used <= limits[index] for index in next_eligible)
+                ),
+            })
+            logger.info(f"PubMed bounded theme retrieval: {len(rounds)} round(s), {used}/{budget} requested IDs")
+            if fallback_enabled and self.retrieval_audit["failed_queries"] and len(selected) < self._max_results:
+                focus = effective_focus_mode(self.config.get("recommendations", {}), today)
+                ids, public_audit = search_public_index(today, self._publication_days, self._max_results, focus)
+                self.retrieval_audit["public_index"] = public_audit
+                existing = {str(record["PMID"]) for record in selected}
+                new_ids = [pmid for pmid in ids if pmid not in queried_ids and pmid not in existing]
+                selected.extend(_recent_results(new_ids))
+                self.retrieval_audit["after_date_filter_count"] = len(selected)
+            return selected[:self._max_results]
 
         # Mode 5 deliberately has no keyword query: retrieve the recent PubMed
         # window first, then let the Zotero-based reranker select relevant papers.

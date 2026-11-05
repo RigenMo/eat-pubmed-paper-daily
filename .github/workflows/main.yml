@@ -17,7 +17,7 @@ concurrency:
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       send_outcome: ${{ steps.send.outcome }}
       quality_passed: ${{ steps.receipt.outputs.quality_passed }}
@@ -53,11 +53,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
           OPENAI_API_BASE: https://llm.goaichat.top/v1
           EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
-          uv run src/zotero_arxiv_daily/main.py executor.send_empty=true llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.max_papers=5 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=400 recommendations.verify_limit=60 source.pubmed.max_results=400 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
+          uv run src/zotero_arxiv_daily/main.py executor.send_empty=true executor.debug=false executor.max_paper_num=10 search.mode=5 source.mix_mode=1 llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.enabled=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
 
       - name: Read delivery receipt
         id: receipt
@@ -76,7 +77,7 @@ jobs:
               fields = {key: receipt[key] for key in ('quality_passed', 'complete_cards', 'expected_cards')}
               fields['reason'] = 'content_shortfall' if not receipt['quality_passed'] else ''
           elif os.environ['SEND_OUTCOME'] == 'success':
-              fields = {'quality_passed': False, 'complete_cards': 'unknown', 'expected_cards': 5, 'reason': 'missing_receipt'}
+              fields = {'quality_passed': False, 'complete_cards': 'unknown', 'expected_cards': 10, 'reason': 'missing_receipt'}
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               for key, value in fields.items():
                   output.write(f'{key}={str(value).lower() if isinstance(value, bool) else value}\n')
@@ -89,6 +90,15 @@ jobs:
         with:
           name: daily-delivery-receipt-${{ github.run_attempt }}
           path: outputs/delivery-receipt.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload recommendation decisions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recommendation-audit-${{ github.run_attempt }}
+          path: outputs/recommendation-audit-summary.json
           if-no-files-found: ignore
           retention-days: 7
 

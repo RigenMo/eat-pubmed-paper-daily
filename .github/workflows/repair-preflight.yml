@@ -12,7 +12,7 @@ jobs:
   preflight:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[run-preflight]')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -28,17 +28,17 @@ jobs:
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
           EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set GOAICHAT_API_KEY first."; exit 1; }
           test -n "$EASYSCHOLAR_API_KEY" || { echo "Set EASYSCHOLAR_API_KEY first."; exit 1; }
-          uv run python scripts/preflight_digest.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 search.mode=5 source.mix_mode=1 recommendations.max_papers=2 recommendations.max_per_journal=1 executor.send_empty=true executor.character_pool=[] email.sender=preflight@example.invalid email.receiver=preflight@example.invalid email.smtp_server=localhost email.smtp_port=1 email.sender_password=unused
+          uv run python scripts/preflight_digest.py llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 search.mode=5 source.mix_mode=1 recommendations.enabled=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 executor.max_paper_num=10 executor.debug=false executor.send_empty=true executor.character_pool=[] email.sender=preflight@example.invalid email.receiver=preflight@example.invalid email.smtp_server=localhost email.smtp_port=1 email.sender_password=unused
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ${{ matrix.mode }}-reports
-          path: outputs/preflight/${{ matrix.mode }}/
+          path: outputs/preflight/${{ matrix.mode }}/summary.json
           retention-days: 7
           if-no-files-found: ignore
-
