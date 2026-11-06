@@ -1,0 +1,29 @@
+name: Verify supervisor without sending email
+on:
+  push:
+    branches: [codex/verify-supervisor-20261106]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  check-delivery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read real delivery and notice status
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Confirm today's delivery is recognized
+        env:
+          DELIVERED: ${{ steps.guard.outputs.delivered }}
+          NOTIFIED: ${{ steps.guard.outputs.notified }}
+        run: |
+          python3 - <<'PY'
+          import os
+          assert os.environ['DELIVERED'] == 'true', 'Today delivery was not recognized'
+          print('Verified delivery=True; prior_notice=' + os.environ['NOTIFIED'])
+          print('Read-only verification; no SMTP credentials or dispatch permission provided.')
+          PY
