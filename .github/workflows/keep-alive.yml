@@ -132,7 +132,7 @@ jobs:
 
   notify-on-failure:
     needs: check-daily
-    if: ${{ !cancelled() && (needs.check-daily.result == 'failure' || needs.check-daily.result == 'cancelled') }}
+    if: ${{ !cancelled() && needs.check-daily.result == 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
