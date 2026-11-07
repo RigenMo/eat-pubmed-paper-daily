@@ -433,3 +433,24 @@ def test_fatal_failure_after_success_does_not_mutate():
     with pytest.raises(RecommendationVerificationError):
         verify_recommendations(papers, client, {}, batch_size=1)
     assert [p.recommendation_matches for p in papers] == original_matches
+
+
+def test_correction_401_preserves_safe_status_and_paper():
+    paper = _paper_with_anchor()
+    original = list(paper.recommendation_matches)
+    client = _DeterministicClient(lambda ids, _: {"invalid": []})
+    first = client.create
+    class Failure(Exception):
+        status_code = 401
+    def create(**kwargs):
+        if client.calls:
+            client.calls.append(kwargs)
+            raise Failure("secret https://example.test")
+        return first(**kwargs)
+    client.chat.completions.create = create
+    with pytest.raises(RecommendationVerificationError) as raised:
+        verify_recommendations([paper], client, {})
+    assert "401" in str(raised.value)
+    assert "secret" not in str(raised.value) and "example.test" not in str(raised.value)
+    assert len(client.calls) == 2
+    assert paper.recommendation_matches == original

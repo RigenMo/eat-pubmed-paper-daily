@@ -762,9 +762,13 @@ def verify_recommendations(
                 content = _request_batch(openai_client, llm_params, material,
                                          correction=_CORRECTION_PROMPT if attempt else None,
                                          timeout=min(120, remaining))
-            except _RequestError:
+            except _RequestError as error:
                 if attempt:
-                    raise RecommendationVerificationError("Recommendation verification response failed closed validation") from None
+                    if error.fatal:
+                        raise
+                    raise RecommendationVerificationError(
+                        f"Recommendation verification response failed closed validation ({error})"
+                    ) from None
                 raise
             try:
                 validated = _parse_and_validate(content, records)
@@ -778,6 +782,8 @@ def verify_recommendations(
                         "Recommendation verification response failed closed validation"
                     ) from None
 
+    # Count top-level batches that cannot recover through splitting; any child
+    # success resets the count, rather than counting individual HTTP failures.
     for batch_offset in range(0, len(source_papers), int(batch_size)):
         batch = source_papers[batch_offset : batch_offset + int(batch_size)]
         try:
