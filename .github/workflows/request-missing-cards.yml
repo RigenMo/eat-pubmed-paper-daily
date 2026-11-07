@@ -1,0 +1,36 @@
+name: Request missing cards after delivery repair
+on:
+  push:
+    branches: [codex/request-missing-cards-20261107]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read confirmed daily progress
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - uses: actions/github-script@v8
+        env:
+          COMPLETE: ${{ steps.guard.outputs.day_complete }}
+          UNKNOWN: ${{ steps.guard.outputs.delivery_unknown }}
+          COUNT: ${{ steps.guard.outputs.paper_count }}
+        with:
+          script: |
+            const today=new Date(Date.now()+8*3600000).toISOString().slice(0,10);
+            if(today!=='2026-11-07') throw new Error('This repair request expired');
+            if(process.env.COMPLETE==='true'||process.env.UNKNOWN!=='false'||Number(process.env.COUNT)<=0) {
+              core.info('No confirmed safe shortfall to dispatch.');return;
+            }
+            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{...context.repo,per_page:100});
+            if(runs.some(r=>['.github/workflows/main.yml','.github/workflows/supplement.yml'].includes(r.path)&&r.status!=='completed')) {
+              core.info('An existing sender is active; no concurrent dispatch.');return;
+            }
+            await github.rest.actions.createWorkflowDispatch({...context.repo,workflow_id:'supplement.yml',ref:'main'});
+            core.info('Requested production supplement for confirmed missing cards only.');
