@@ -125,6 +125,7 @@ jobs:
             core.info('Automatic supervision requested for sender run ' + context.runId + '; recover=' + failed);
 
       - name: Complete missing paper cards
+        if: ${{ !cancelled() }}
         uses: actions/github-script@v8
         env:
           SEND_OUTCOME: ${{ needs.calculate-and-send.outputs.send_outcome }}

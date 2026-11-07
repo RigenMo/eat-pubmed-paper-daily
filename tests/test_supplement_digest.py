@@ -47,3 +47,29 @@ def test_duplicate_delivery_fails_closed(monkeypatch, tmp_path):
         module.supplement(SimpleNamespace())
 
 
+
+
+@pytest.mark.parametrize('log,blocked', [
+    ('SUPPLEMENT_SMTP_STARTED\nSUPPLEMENT_RETRY_SAFE false', True),
+    ('SUPPLEMENT_RETRY_SAFE true', False),
+])
+def test_previous_supplement_failure_requires_safe_marker(monkeypatch, log, blocked):
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 7, 4, tzinfo=timezone.utc)
+    run = {'id': 11, 'created_at': '2026-11-07T03:00:00Z'}
+    job = {'id': 22, 'name': 'supplement', 'steps': [
+        {'name': 'Send missing cards', 'conclusion': 'failure', 'completed_at': '2026-11-07T03:30:00Z'}]}
+    def pages(url, token, key):
+        if '/workflows/main.yml/' in url:
+            return []
+        if '/workflows/supplement.yml/' in url:
+            return [run]
+        return [job]
+    monkeypatch.setattr(module, 'api_pages', pages)
+    monkeypatch.setattr(module, 'load_delivery_receipt', lambda *args: None)
+    monkeypatch.setattr(module, 'read_job_log', lambda *args: log)
+    if blocked:
+        with pytest.raises(RuntimeError, match='outcome unknown'):
+            module.today_history('owner/repo', 'test', '12', now)
+    else:
+        assert module.today_history('owner/repo', 'test', '12', now)[0] == []

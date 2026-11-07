@@ -3,6 +3,7 @@ import json
 import os
 import zipfile
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen, build_opener, HTTPRedirectHandler
 
@@ -70,32 +71,49 @@ def load_delivery_receipt(repository, token, run_id):
     return receipt
 
 
-def delivery_status(repository, token, current_run, now=None, notice_kind="failure"):
+def delivery_status(repository, token, current_run, now=None, notice_kind="failure", progress=None):
     now = now or datetime.now(SHANGHAI)
     today = now.astimezone(SHANGHAI).date()
     start = datetime.combine(today - timedelta(days=1), datetime.min.time(), SHANGHAI).astimezone(timezone.utc)
     query = urlencode({'created': '>=' + start.strftime('%Y-%m-%dT%H:%M:%SZ')})
     base = f'https://api.github.com/repos/{repository}/actions'
-    delivered = notified = False
-    for workflow in ('main.yml', 'keep-alive.yml'):
-        runs = list(api_pages(f'{base}/workflows/{workflow}/runs?{query}', token, 'workflow_runs'))
-        if current_run is not None and all(str(r['id']) != str(current_run) for r in runs):
+    delivered = notified = unknown = False
+    urls = set()
+    for workflow in ('main.yml', 'supplement.yml', 'keep-alive.yml'):
+        try:
+            runs = list(api_pages(f'{base}/workflows/{workflow}/runs?{query}', token, 'workflow_runs'))
+        except HTTPError as error:
+            if workflow == 'supplement.yml' and error.code == 404:
+                continue
+            raise
+        if workflow != 'supplement.yml' and current_run is not None and all(str(r['id']) != str(current_run) for r in runs):
             runs.append({'id': current_run})
         for run in runs:
             run_id = str(run['id'])
-            if workflow == 'main.yml':
+            receipt = None
+            if workflow in ('main.yml', 'supplement.yml'):
                 receipt = load_delivery_receipt(repository, token, run_id)
                 if receipt and receipt['date'] == today.isoformat():
-                    delivered = True
+                    delivered |= receipt['paper_count'] > 0
+                    if receipt['paper_count'] != receipt['complete_cards']:
+                        unknown = True
+                    else:
+                        for paper in receipt['papers']:
+                            url = paper['url']
+                            if not isinstance(url, str) or not url.strip():
+                                unknown = True
+                            else:
+                                urls.add(url.strip())
             for job in api_pages(f'{base}/runs/{run_id}/jobs?filter=all', token, 'jobs'):
                 for step in (job.get('steps') or []):
                     if step.get('conclusion') != 'success':
                         continue
                     is_delivery = workflow == 'main.yml' and job['name'] == 'calculate-and-send' and step['name'] == 'Run script'
+                    is_supplement = workflow == 'supplement.yml' and job['name'] == 'supplement' and step['name'] == 'Send missing cards'
                     is_notice = job['name'] == 'notify-on-failure' and ((workflow == 'main.yml' and step['name'] == 'Send failure notice') or (workflow == 'keep-alive.yml' and step['name'] == 'Send supervisor failure notice'))
                     if notice_kind == 'morning':
                         is_notice = workflow == 'keep-alive.yml' and job['name'] == 'morning-deadline' and step['name'] == 'Send morning deadline notice'
-                    if not (is_delivery or is_notice):
+                    if not (is_delivery or is_supplement or is_notice):
                         continue
                     completed_at = step.get('completed_at')
                     if not isinstance(completed_at, str):
@@ -104,15 +122,27 @@ def delivery_status(repository, token, current_run, now=None, notice_kind="failu
                     if completed.tzinfo is None:
                         raise ValueError('Successful send step has no timezone')
                     if completed.astimezone(SHANGHAI).date() == today:
-                        delivered |= is_delivery
+                        if is_delivery or is_supplement:
+                            attempt = job.get('run_attempt')
+                            receipt_matches = receipt and (attempt is None or receipt.get('run_attempt') is None or str(attempt) == receipt['run_attempt'])
+                            if not receipt_matches:
+                                unknown = True
+                                delivered |= is_delivery
+                            elif receipt['date'] == today.isoformat() and receipt['paper_count'] > 0:
+                                delivered = True
                         notified |= is_notice
+    if progress is not None:
+        progress.update(paper_count=len(urls), day_complete=len(urls) >= 10, delivery_unknown=unknown)
     return delivered, notified
 
 
 if __name__ == '__main__':
-    delivered, notified = delivery_status(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], os.environ['GITHUB_RUN_ID'], notice_kind=os.environ.get('NOTICE_KIND', 'failure'))
+    progress = {}
+    delivered, notified = delivery_status(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], os.environ['GITHUB_RUN_ID'], notice_kind=os.environ.get('NOTICE_KIND', 'failure'), progress=progress)
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
         output.write(f'delivered={str(delivered).lower()}\nnotified={str(notified).lower()}\n')
+        for key, value in progress.items():
+            output.write(f'{key}={str(value).lower()}\n')
     print(f'Delivery status: delivered={delivered}, notified={notified}')
 
 

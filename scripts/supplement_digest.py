@@ -55,19 +55,24 @@ def today_history(repository, token, current_run, now):
                 continue
             receipt = load_delivery_receipt(repository, token, run_id)
             jobs = list(api_pages(f'{base}/runs/{run_id}/jobs?filter=all', token, 'jobs'))
-            successful = []
+            valid_receipt = receipt and receipt['date'] == today.isoformat()
             for job in jobs:
                 for step in job.get('steps') or []:
                     delivery_step = ((workflow == 'main.yml' and job.get('name') == 'calculate-and-send' and step.get('name') == 'Run script') or (workflow == 'supplement.yml' and job.get('name') == 'supplement' and step.get('name') == 'Send missing cards'))
-                    if not delivery_step or step.get('conclusion') != 'success':
+                    if not delivery_step or step.get('conclusion') not in ('success', 'failure', 'cancelled'):
                         continue
                     completed = datetime.fromisoformat(step['completed_at'].replace('Z', '+00:00'))
                     if completed.tzinfo is None:
                         raise ValueError('Missing completion timezone')
-                    if completed.astimezone(SHANGHAI).date() == today:
-                        successful.append(job)
-            if successful and (not receipt or receipt['date'] != today.isoformat()):
-                raise RuntimeError('Successful send step without a valid daily receipt')
+                    if completed.astimezone(SHANGHAI).date() != today or valid_receipt:
+                        continue
+                    log = read_job_log(repository, token, job['id'])
+                    if workflow == 'supplement.yml':
+                        safe = 'SUPPLEMENT_RETRY_SAFE true' in log and 'SUPPLEMENT_SMTP_STARTED' not in log
+                        if not safe:
+                            raise RuntimeError('Supplement send outcome unknown without receipt')
+                    elif step['conclusion'] == 'success' or 'Sending email...' in log:
+                        raise RuntimeError('Main send outcome unknown without receipt')
             if receipt and receipt['date'] == today.isoformat():
                 receipts.append(receipt)
                 if workflow == 'main.yml' and receipt['paper_count'] < 10:
@@ -75,16 +80,21 @@ def today_history(repository, token, current_run, now):
     return receipts, main_jobs, max(1, attempts)
 
 
+def read_job_log(repository, token, job_id):
+    request = Request(f'https://api.github.com/repos/{repository}/actions/jobs/{job_id}/logs', headers={
+        'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
+    with build_opener(SafeRedirect()).open(request, timeout=30) as response:
+        data = response.read(8 * 1024 * 1024 + 1)
+    if len(data) > 8 * 1024 * 1024:
+        raise ValueError('Job log too large')
+    return data.decode('utf-8', errors='replace')
+
+
 def read_candidates(repository, token, job_ids):
     found = []
     for job_id in job_ids:
-        request = Request(f'https://api.github.com/repos/{repository}/actions/jobs/{job_id}/logs', headers={
-            'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
-        with build_opener(SafeRedirect()).open(request, timeout=30) as response:
-            data = response.read(8 * 1024 * 1024 + 1)
-        if len(data) > 8 * 1024 * 1024:
-            raise ValueError('Job log too large')
-        found.extend(pmid(match) for match in READ.findall(data.decode('utf-8', errors='replace')))
+        log = read_job_log(repository, token, job_id)
+        found.extend(pmid(match) for match in READ.findall(log))
     return list(dict.fromkeys(found))
 
 
@@ -94,6 +104,7 @@ def write_summary(sent, cumulative, attempts):
     output = Path('outputs/supplement-summary.json')
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary), encoding='utf-8')
+    print("SUPPLEMENT_RETRY_SAFE true", flush=True)
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
             stream.write(f"complete={str(summary['complete']).lower()}\ncumulative={cumulative}\nretry_safe=true\n")
@@ -116,7 +127,7 @@ def supplement(config, progress=None):
         write_summary(0, len(delivered), attempts)
         print(f'Supplement skipped: already delivered {len(delivered)}')
         return 0
-    if attempts > 2:
+    if attempts > 9:
         raise RuntimeError('Daily supplement attempt limit exceeded')
     if not receipts or not job_ids:
         raise RuntimeError('No confirmed main delivery available for supplementation')
@@ -183,6 +194,7 @@ def supplement(config, progress=None):
         raise RuntimeError('Prepared supplement crossed the Shanghai day; no email sent')
     html = render_email(selected, summary=f'今日补充{count}篇，累计{total}/10。')
     progress['retry_safe'] = False
+    print('SUPPLEMENT_SMTP_STARTED', flush=True)
     send_email(config, html, subject=f'Eat Paper Daily {today:%Y/%m/%d}（补充{count}篇，今日累计{total}/10）')
     receipt_written = False
     try:
@@ -237,6 +249,7 @@ def main(config: DictConfig):
                     stream.write(f"complete={str(summary['complete']).lower()}\ncumulative={cumulative}\nretry_safe={str(safe).lower()}\n")
         except Exception:
             pass
+        print(f'SUPPLEMENT_RETRY_SAFE {str(safe).lower()}', flush=True)
         raise
 
 if __name__ == '__main__':

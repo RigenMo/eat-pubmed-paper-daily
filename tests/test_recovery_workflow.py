@@ -8,7 +8,7 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/keep-alive.yml'
 
 
-def run_prepare(now, times=(), delivered=False, active=False):
+def run_prepare(now, times=(), delivered=False, active=False, count=0, unknown=False, supplement_active=False, target=False):
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding='utf-8'))
     steps = workflow['jobs']['check-daily']['steps']
     script = next(step['with']['script'] for step in steps if step['name'] == 'Prepare recovery')
@@ -27,17 +27,21 @@ const github = {rest: {actions: {listWorkflowRuns, listJobsForWorkflowRun,
   paginate: async (method, params) => {
     if (method === listJobsForWorkflowRun) return [{steps: [{name: 'Dispatch missing daily email', conclusion: 'success', completed_at: input.times[params.run_id - 1]}]}];
     if (params.workflow_id === 'main.yml') return input.active ? [{status: 'in_progress'}] : [];
+    if (params.workflow_id === 'supplement.yml') return input.supplement_active ? [{status: 'queued'}] : [];
     return input.times.map((_, index) => ({id: index + 1}));
   }};
-process.env.DELIVERED = input.delivered ? 'true' : 'false';
+process.env.DAY_COMPLETE = input.delivered ? 'true' : 'false';
+process.env.DELIVERY_UNKNOWN = input.unknown ? 'true' : 'false';
+process.env.PAPER_COUNT = String(input.count);
 process.env.EVENT_NAME = 'workflow_dispatch';
 process.env.RECOVER = 'true';
 (async () => { await (async () => {
 ''' + script + r'''
 })(); console.log(JSON.stringify(outputs)); })().catch(error => { console.error(error); process.exit(1); });
 '''
-    result = subprocess.run(['node', '-e', harness, json.dumps(dict(now=now, times=times, delivered=delivered, active=active))], capture_output=True, text=True, check=True)
-    return json.loads(result.stdout)['needs_dispatch']
+    result = subprocess.run(['node', '-e', harness, json.dumps(dict(now=now, times=times, delivered=delivered, active=active, count=count, unknown=unknown, supplement_active=supplement_active))], capture_output=True, text=True, check=True)
+    outputs = json.loads(result.stdout)
+    return outputs.get('workflow_id') if target else outputs['needs_dispatch']
 
 
 def test_delivered_and_active_skip():
@@ -70,3 +74,12 @@ def test_reserved_final_recovery():
     assert run_prepare('2026-11-07T01:00:00Z', times) == 'true'
     assert run_prepare('2026-11-07T01:10:00Z', times) == 'true'
     assert run_prepare('2026-11-07T01:40:00Z', times + ['2026-11-07T01:00:00Z']) == 'false'
+
+
+def test_target_and_progress():
+    now = '2026-11-07T00:00:00Z'
+    assert run_prepare(now, count=8, target=True) == 'supplement.yml'
+    assert run_prepare(now, count=0, target=True) == 'main.yml'
+    assert run_prepare(now, delivered=True, count=10) == 'false'
+    assert run_prepare(now, count=8, unknown=True) == 'false'
+    assert run_prepare(now, count=8, supplement_active=True) == 'false'
