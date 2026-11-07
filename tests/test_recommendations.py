@@ -340,3 +340,96 @@ def test_build_zotero_queries_discards_ungrounded_extra_term_but_keeps_each_sour
     assert any("meal timing" in query for query in queries)
     assert not any("invented" in query or "cohort" in query for query in queries)
 
+
+def test_request_failure_isolated_and_audited():
+    papers = [_paper_with_anchor(), _paper_with_anchor()]
+    client = _DeterministicClient(lambda ids, _: {"recommendations": [{"id": i, "related": True, "reason": "Direct relationship.", "anchor_index": 0, "candidate_quote": "dietary protein timing", "anchor_quote": "meal timing and dietary protein"} for i in ids]})
+    original = client.create
+    def create(**kwargs):
+        if not client.calls:
+            client.calls.append(kwargs)
+            raise TimeoutError("secret https://example.test")
+        return original(**kwargs)
+    client.chat.completions.create = create
+    audit = []
+    result = verify_recommendations(papers, client, {}, batch_size=1, audit=audit)
+    assert len(result) == 1 and result[0] is papers[1]
+    assert not papers[0].recommendation_matches
+    assert any(item.get("status") == "verification_unavailable" and item["related"] is None for item in audit)
+
+
+def test_split_batch_recovers_and_has_bounded_requests():
+    papers = [_paper_with_anchor() for _ in range(10)]
+    client = _DeterministicClient(lambda ids, _: {"recommendations": [{"id": i, "related": False, "reason": "Unrelated topic.", "anchor_index": None, "candidate_quote": None, "anchor_quote": None} for i in ids]})
+    original = client.create
+    def create(**kwargs):
+        ids = re.findall(r"Candidate ID: (\d+)", kwargs["messages"][1]["content"])
+        if len(ids) > 1:
+            client.calls.append(kwargs)
+            raise TimeoutError("secret")
+        return original(**kwargs)
+    client.chat.completions.create = create
+    verify_recommendations(papers, client, {}, batch_size=2)
+    assert len(client.calls) <= 11
+
+
+@pytest.mark.parametrize("status", [401, 429, 503])
+def test_all_request_failures_safe_and_bounded(status):
+    class Failure(Exception):
+        status_code = status
+    client = _DeterministicClient(lambda ids, _: None)
+    def create(**kwargs):
+        client.calls.append(kwargs)
+        raise Failure("secret https://example.test/private")
+    client.chat.completions.create = create
+    with pytest.raises(RecommendationVerificationError) as raised:
+        verify_recommendations([_paper_with_anchor() for _ in range(20)], client, {}, batch_size=2)
+    assert str(status) in str(raised.value)
+    assert "secret" not in str(raised.value) and "example.test" not in str(raised.value)
+    assert len(client.calls) == (1 if status in (401, 429) else 7)
+
+
+def test_invalid_quote_does_not_mutate_earlier_papers():
+    papers = [_paper_with_anchor(), _paper_with_anchor()]
+    original = [list(p.recommendation_matches) for p in papers]
+    calls = []
+    def payload(ids, _):
+        calls.append(ids)
+        return {"recommendations": [{"id": ids[0], "related": True, "anchor_index": 0,
+            "reason": "Direct relation.", "candidate_quote": "dietary protein timing" if len(calls) == 1 else "invented phrase", "anchor_quote": "meal timing and dietary protein"}]}
+    with pytest.raises(RecommendationVerificationError):
+        verify_recommendations(papers, _DeterministicClient(payload), {}, batch_size=1)
+    assert [p.recommendation_matches for p in papers] == original
+
+
+def test_three_split_recoveries_process_every_candidate():
+    papers = [_paper_with_anchor() for _ in range(6)]
+    client = _DeterministicClient(lambda ids, _: {"recommendations": [{"id": i, "related": True, "reason": "Direct relationship.", "anchor_index": 0, "candidate_quote": "dietary protein timing", "anchor_quote": "meal timing and dietary protein"} for i in ids]})
+    original = client.create
+    def create(**kwargs):
+        ids = re.findall(r"Candidate ID: (\d+)", kwargs["messages"][1]["content"])
+        if len(ids) > 1:
+            client.calls.append(kwargs)
+            raise TimeoutError("secret")
+        return original(**kwargs)
+    client.chat.completions.create = create
+    result = verify_recommendations(papers, client, {}, batch_size=2)
+    assert len(result) == 6 and all(a is b for a, b in zip(result, papers))
+    assert len(client.calls) == 9
+
+
+def test_fatal_failure_after_success_does_not_mutate():
+    papers = [_paper_with_anchor(), _paper_with_anchor()]
+    original_matches = [list(p.recommendation_matches) for p in papers]
+    client = _DeterministicClient(lambda ids, _: {"recommendations": [{"id": ids[0], "related": True, "reason": "Direct relationship.", "anchor_index": 0, "candidate_quote": "dietary protein timing", "anchor_quote": "meal timing and dietary protein"}]})
+    original = client.create
+    class Failure(Exception):
+        status_code = 401
+    def create(**kwargs):
+        if client.calls:
+            raise Failure("secret")
+        return original(**kwargs)
+    client.chat.completions.create = create
+    with pytest.raises(RecommendationVerificationError):
+        verify_recommendations(papers, client, {}, batch_size=1)
+    assert [p.recommendation_matches for p in papers] == original_matches
