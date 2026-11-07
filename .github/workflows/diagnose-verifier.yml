@@ -1,0 +1,42 @@
+name: Diagnose verifier with public fixtures only
+on:
+  push:
+    branches: [codex/diagnose-verifier-20261107]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src
+      OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Probe provider using public regression fixtures
+        run: |
+          uv run python - <<'PY'
+          import contextlib,io,json,logging,os
+          from openai import OpenAI
+          from loguru import logger
+          from tests.test_recommendations import _paper_with_anchor
+          from zotero_arxiv_daily.recommendations import _batch_material,_VERIFIER_SYSTEM_PROMPT
+          logger.remove()
+          logging.disable(logging.CRITICAL)
+          client=OpenAI(api_key=os.environ['OPENAI_API_KEY'],base_url='https://llm.goaichat.top/v1',timeout=120,max_retries=0)
+          material,_=_batch_material([_paper_with_anchor() for _ in range(5)],0)
+          probes=[('public_health',[{'role':'user','content':'Return only a JSON object with ok=true.'}]),('public_verifier_batch',[{'role':'system','content':_VERIFIER_SYSTEM_PROMPT},{'role':'user','content':material}])]
+          for name,messages in probes:
+              result={'probe':name,'request_chars':sum(len(m['content']) for m in messages)}
+              try:
+                  with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                      response=client.chat.completions.create(model='kimi-k3',max_tokens=65536,response_format={'type':'json_object'},messages=messages)
+                  result.update(success=True,has_content=bool(response.choices[0].message.content))
+              except Exception as error:
+                  status=getattr(error,'status_code',None)
+                  code=getattr(error,'code',None)
+                  allowed={'insufficient_quota','insufficient_user_quota','context_length_exceeded','model_not_found','invalid_api_key','rate_limit_exceeded'}
+                  result.update(success=False,error_type=type(error).__name__,http_status=status if type(status) is int else None,code=code if code in allowed else None)
+              print('PUBLIC_PROVIDER_DIAGNOSTIC '+json.dumps(result,ensure_ascii=False),flush=True)
+          PY
