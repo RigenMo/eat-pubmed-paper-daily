@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import unicodedata
 from typing import Any
 from loguru import logger
@@ -71,6 +72,21 @@ class RecommendationVerificationError(RuntimeError):
 
 class RecommendationQueryError(RuntimeError):
     """A safe, fail-closed error raised by automatic query extraction."""
+
+
+class _RequestError(RecommendationVerificationError):
+    def __init__(self, error: Exception):
+        status = getattr(error, "status_code", None)
+        status = status if type(status) is int and 100 <= status <= 599 else None
+        name = type(error).__name__
+        allowed = {"TimeoutError", "APITimeoutError", "APIConnectionError", "ConnectionError", "APIStatusError", "BadRequestError", "AuthenticationError", "PermissionDeniedError", "RateLimitError", "InternalServerError"}
+        name = name if name in allowed else "OtherError"
+        message = str(error).lower()
+        context = status == 413 or (status == 400 and any(term in message for term in ("context_length", "context length", "maximum context")))
+        self.retryable = context or (status is not None and status >= 500) or name in {"TimeoutError", "APITimeoutError", "APIConnectionError", "ConnectionError"}
+        self.fatal = (status is not None and 400 <= status < 500 and not context) or (status is None and not self.retryable)
+        category = "context_limit" if context else "http" if status else "connection" if "Connection" in name else "timeout" if "Timeout" in name else "request"
+        super().__init__(f"category={category}, type={name}, status={status or 'unknown'}")
 
 
 class _RecommendationValidationError(ValueError):
@@ -463,8 +479,8 @@ def _build_llm_zotero_queries(
                 ) from None
         except RecommendationQueryError:
             raise
-        except Exception:
-            raise RecommendationQueryError("Automatic Zotero query extraction request failed") from None
+        except Exception as error:
+            raise RecommendationQueryError(f"Automatic Zotero query extraction request failed ({_RequestError(error)})") from None
 
     if validated is None:  # pragma: no cover - guarded by the loop above
         raise RecommendationQueryError("Automatic Zotero query extraction failed")
@@ -665,13 +681,17 @@ def _request_batch(
     llm_params: Any,
     material: str,
     correction: str | None = None,
+    timeout: float = 120,
 ) -> str:
     user_content = material
     if correction:
         user_content += "\n\nCORRECTION: " + correction
     kwargs = _generation_kwargs(llm_params)
     kwargs.setdefault("response_format", {"type": "json_object"})
+    kwargs["timeout"] = timeout
     try:
+        if type(openai_client).__module__.startswith("openai"):
+            openai_client = openai_client.with_options(max_retries=0)
         response = openai_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": _VERIFIER_SYSTEM_PROMPT},
@@ -679,10 +699,10 @@ def _request_batch(
             ],
             **kwargs,
         )
-    except Exception:
+    except Exception as error:
         # Do not expose provider URLs, credentials, or prompt material in the
         # exception that reaches the workflow log.
-        raise RecommendationVerificationError("Recommendation verification request failed") from None
+        raise _RequestError(error) from None
     return _response_text(response)
 
 
@@ -716,35 +736,102 @@ def verify_recommendations(
         return []
 
     decisions: list[tuple[Paper, dict[str, Any], list[dict[str, Any]]]] = []
-    for batch_offset in range(0, len(source_papers), int(batch_size)):
-        batch = source_papers[batch_offset : batch_offset + int(batch_size)]
-        material, records = _batch_material(batch, batch_offset)
-        validated = None
+    unavailable: list[Paper] = []
+    deadline = time.monotonic() + 900
+    extra_requests = 0
+    consecutive_failures = 0
+    valid_responses = 0
+    last_error = None
+
+    def process(batch: list[Paper], offset: int, child: bool = False) -> None:
+        nonlocal valid_responses, extra_requests
+        material, records = _batch_material(batch, offset)
         for attempt in range(2):
+            if child:
+                if extra_requests >= 6:
+                    if attempt:
+                        raise RecommendationVerificationError("Recommendation verification response failed closed validation")
+                    raise _RequestError(TimeoutError())
+                extra_requests += 1
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if attempt:
+                    raise RecommendationVerificationError("Recommendation verification response failed closed validation")
+                raise _RequestError(TimeoutError())
             try:
-                content = _request_batch(
-                    openai_client,
-                    llm_params,
-                    material,
-                    correction=_CORRECTION_PROMPT if attempt else None,
-                )
+                content = _request_batch(openai_client, llm_params, material,
+                                         correction=_CORRECTION_PROMPT if attempt else None,
+                                         timeout=min(120, remaining))
+            except _RequestError as error:
+                if attempt:
+                    if error.fatal:
+                        raise
+                    raise RecommendationVerificationError(
+                        f"Recommendation verification response failed closed validation ({error})"
+                    ) from None
+                raise
+            try:
                 validated = _parse_and_validate(content, records)
-                break
+                valid_responses += 1
+                for record in records:
+                    decisions.append((record["paper"], validated[record["id"]], record["anchors"]))
+                return
             except _RecommendationValidationError:
                 if attempt == 1:
                     raise RecommendationVerificationError(
                         "Recommendation verification response failed closed validation"
                     ) from None
-        if validated is None:  # pragma: no cover - guarded by the loop above
-            raise RecommendationVerificationError("Recommendation verification failed")
-        for record in records:
-            decisions.append((record["paper"], validated[record["id"]], record["anchors"]))
+
+    # Count top-level batches that cannot recover through splitting; any child
+    # success resets the count, rather than counting individual HTTP failures.
+    for batch_offset in range(0, len(source_papers), int(batch_size)):
+        batch = source_papers[batch_offset : batch_offset + int(batch_size)]
+        try:
+            process(batch, batch_offset)
+            consecutive_failures = 0
+            continue
+        except _RequestError as error:
+            logger.warning("Recommendation verification request failed: {}", error)
+            if error.fatal:
+                raise
+            last_error = error
+            consecutive_failures += 1
+
+        if last_error.retryable and len(batch) > 1 and extra_requests <= 4 and consecutive_failures < 3:
+            split = len(batch) // 2
+            children = ((batch[:split], batch_offset), (batch[split:], batch_offset + split))
+            for index, (child, offset) in enumerate(children):
+                try:
+                    process(child, offset, child=True)
+                    consecutive_failures = 0
+                except _RequestError as error:
+                    logger.warning("Recommendation verification request failed: {}", error)
+                    if error.fatal:
+                        raise
+                    last_error = error
+                    unavailable.extend(child)
+        else:
+            unavailable.extend(batch)
+        if last_error.fatal or consecutive_failures >= 3 or time.monotonic() >= deadline:
+            unavailable.extend(source_papers[batch_offset + len(batch):])
+            break
+
+    if valid_responses == 0:
+        raise last_error or RecommendationVerificationError("Recommendation verification request failed")
 
     # Only now clear stale anchors and expose the small, email-safe verified
     # record.  The source abstract remains internal to the verifier and is not
     # copied into recommendation_matches.
     for paper in source_papers:
         paper.recommendation_matches = []
+
+    if audit is not None:
+        for paper in unavailable:
+            audit.append({"title": paper.title, "url": paper.url, "journal": paper.journal,
+                          "publication_date": paper.publication_date,
+                          "jif": (paper.journal_metrics or {}).get("jif"),
+                          "related": None, "reason": "verification_unavailable",
+                          "status": "verification_unavailable"})
 
     verified_papers = []
     for paper, decision, anchors in decisions:
@@ -783,4 +870,3 @@ __all__ = [
     "build_zotero_queries",
     "verify_recommendations",
 ]
-

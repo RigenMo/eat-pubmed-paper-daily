@@ -327,7 +327,8 @@ class Executor:
         summary = {
             "schema_version": 1, "focus_mode": mode, "retrieval": audit["retrieval"],
             "relevance_checked": len(audit["relevance"]),
-            "relevance_rejected": sum(not item.get("related", False) for item in audit["relevance"]),
+            "relevance_rejected": sum(item.get("related") is False for item in audit["relevance"]),
+            "verification_unavailable": sum(item.get("status") == "verification_unavailable" for item in audit["relevance"]),
             "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
             "selection_candidates": len(selection),
             "selected_count": sum(item["selected"] for item in selection),
