@@ -1,0 +1,42 @@
+name: Repair today's delivery once
+on:
+  push:
+    branches: [codex/repair-send-once-20261107]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  request-repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify delivery before a single repair request
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Request today's production sender if still missing
+        uses: actions/github-script@v8
+        env:
+          DELIVERED: ${{ steps.guard.outputs.delivered }}
+        with:
+          script: |
+            const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0,10);
+            if (today !== '2026-11-07') throw new Error('This one-time repair request has expired');
+            if (process.env.DELIVERED === 'true') {
+              core.info('Already delivered today; no repair dispatch.');
+              return;
+            }
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              ...context.repo, workflow_id: 'main.yml', per_page: 100
+            });
+            const active = runs.find(run => run.status !== 'completed');
+            if (active) {
+              core.info('Sender run ' + active.id + ' is active; following it instead of dispatching.');
+              return;
+            }
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'main.yml', ref: 'main'
+            });
+            core.info('Requested one explicit post-fix repair send; this is not natural-schedule acceptance.');
