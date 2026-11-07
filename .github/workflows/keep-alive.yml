@@ -111,7 +111,8 @@ jobs:
                 }
               }
             }
-            if (dispatchTimes.length >= 6 || (dispatchTimes.length && Date.now() - Math.max(...dispatchTimes) < 30 * 60000)) {
+            const maxDispatches = hour >= 9 ? 7 : 6;
+            if (dispatchTimes.length >= maxDispatches || (dispatchTimes.length && Date.now() - Math.max(...dispatchTimes) < 30 * 60000)) {
               core.info('Recovery dispatch limit or cooldown reached.');
               return;
             }

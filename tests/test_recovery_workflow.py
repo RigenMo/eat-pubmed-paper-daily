@@ -48,9 +48,9 @@ def test_delivered_and_active_skip():
 def test_daily_limit_and_shanghai_date():
     # Previous UTC date, but same Shanghai date as the current run.
     times = [f'2026-11-06T{hour}:00:00Z' for hour in ('16', '17', '18', '19', '20')]
-    assert run_prepare('2026-11-07T01:00:00Z', times) == 'true'
-    assert run_prepare('2026-11-07T01:00:00Z', times + ['2026-11-06T21:00:00Z']) == 'false'
-    assert run_prepare('2026-11-07T01:00:00Z', times + ['2026-11-06T15:59:59Z']) == 'true'
+    assert run_prepare('2026-11-07T00:00:00Z', times) == 'true'
+    assert run_prepare('2026-11-07T00:00:00Z', times + ['2026-11-06T21:00:00Z']) == 'false'
+    assert run_prepare('2026-11-07T00:00:00Z', times + ['2026-11-06T15:59:59Z']) == 'true'
 
 
 @pytest.mark.parametrize(('now', 'expected'), [('2026-11-07T00:29:59Z', 'false'), ('2026-11-07T00:30:00Z', 'true')])
@@ -62,3 +62,11 @@ def test_cooldown(now, expected):
 def test_deadline(now, expected):
     assert run_prepare(now) == expected
 
+
+
+def test_reserved_final_recovery():
+    times = [f'2026-11-06T{hour}:00:00Z' for hour in ('16', '17', '18', '19', '20', '21')]
+    assert run_prepare('2026-11-07T00:59:00Z', times) == 'false'
+    assert run_prepare('2026-11-07T01:00:00Z', times) == 'true'
+    assert run_prepare('2026-11-07T01:10:00Z', times) == 'true'
+    assert run_prepare('2026-11-07T01:40:00Z', times + ['2026-11-07T01:00:00Z']) == 'false'
