@@ -70,11 +70,11 @@ def load_delivery_receipt(repository, token, run_id):
     return receipt
 
 
-def delivery_status(repository, token, current_run, now=None):
+def delivery_status(repository, token, current_run, now=None, notice_kind="failure"):
     now = now or datetime.now(SHANGHAI)
     today = now.astimezone(SHANGHAI).date()
     start = datetime.combine(today - timedelta(days=1), datetime.min.time(), SHANGHAI).astimezone(timezone.utc)
-    query = urlencode({'status': 'completed', 'created': '>=' + start.strftime('%Y-%m-%dT%H:%M:%SZ')})
+    query = urlencode({'created': '>=' + start.strftime('%Y-%m-%dT%H:%M:%SZ')})
     base = f'https://api.github.com/repos/{repository}/actions'
     delivered = notified = False
     for workflow in ('main.yml', 'keep-alive.yml'):
@@ -88,11 +88,13 @@ def delivery_status(repository, token, current_run, now=None):
                 if receipt and receipt['date'] == today.isoformat():
                     delivered = True
             for job in api_pages(f'{base}/runs/{run_id}/jobs?filter=all', token, 'jobs'):
-                for step in job.get('steps', []):
+                for step in (job.get('steps') or []):
                     if step.get('conclusion') != 'success':
                         continue
                     is_delivery = workflow == 'main.yml' and job['name'] == 'calculate-and-send' and step['name'] == 'Run script'
                     is_notice = job['name'] == 'notify-on-failure' and ((workflow == 'main.yml' and step['name'] == 'Send failure notice') or (workflow == 'keep-alive.yml' and step['name'] == 'Send supervisor failure notice'))
+                    if notice_kind == 'morning':
+                        is_notice = workflow == 'keep-alive.yml' and job['name'] == 'morning-deadline' and step['name'] == 'Send morning deadline notice'
                     if not (is_delivery or is_notice):
                         continue
                     completed_at = step.get('completed_at')
@@ -108,7 +110,7 @@ def delivery_status(repository, token, current_run, now=None):
 
 
 if __name__ == '__main__':
-    delivered, notified = delivery_status(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], os.environ['GITHUB_RUN_ID'])
+    delivered, notified = delivery_status(os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_TOKEN'], os.environ['GITHUB_RUN_ID'], notice_kind=os.environ.get('NOTICE_KIND', 'failure'))
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
         output.write(f'delivered={str(delivered).lower()}\nnotified={str(notified).lower()}\n')
     print(f'Delivery status: delivered={delivered}, notified={notified}')

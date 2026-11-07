@@ -12,8 +12,9 @@ on:
         type: string
         default: ''
   schedule:
-    - cron: '10 17 * * *' # 01:10 Asia/Shanghai early recovery check.
-    - cron: '10 22 * * *' # 06:10 Asia/Shanghai morning recovery check.
+    - cron: '10 17-23 * * *' # 01:10-07:10 Asia/Shanghai.
+    - cron: '10 0-1 * * *' # 08:10-09:10 Asia/Shanghai.
+    - cron: '10 2 * * *' # 10:10 Asia/Shanghai deadline check.
     - cron: '37 0-15 * * *' # Hourly, 08:37-23:37 Asia/Shanghai.
   workflow_run:
     workflows: ['Send emails daily']
@@ -61,7 +62,7 @@ jobs:
             const workflow_id = 'main.yml';
             const localTime = new Date(Date.now() + 8 * 3600000);
             const hour = localTime.getUTCHours();
-            const earlyCheckDue = hour > 1 || (hour === 1 && localTime.getUTCMinutes() >= 10);
+            const earlyCheckDue = (hour > 1 || (hour === 1 && localTime.getUTCMinutes() >= 10)) && hour < 10;
             const allowed = (process.env.EVENT_NAME === 'schedule' && earlyCheckDue) ||
               (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.RECOVER === 'true') ||
               (process.env.EVENT_NAME === 'workflow_run' && ['failure', 'cancelled'].includes(process.env.RUN_CONCLUSION));
@@ -91,6 +92,7 @@ jobs:
               owner, repo, workflow_id: 'keep-alive.yml', status: 'completed', per_page: 100,
               created: `>=${new Date(Date.now() - 2 * 86400000).toISOString()}`
             });
+            const dispatchTimes = [];
             for (const run of priorRuns) {
               if (run.id === context.runId) continue;
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
@@ -104,11 +106,18 @@ jobs:
                   }
                   const dispatchDay = new Date(Date.parse(step.completed_at) + 8 * 3600000).toISOString().slice(0, 10);
                   if (dispatchDay === today) {
-                    core.info('A recovery dispatch already succeeded today.');
-                    return;
+                    dispatchTimes.push(Date.parse(step.completed_at));
                   }
                 }
               }
+            }
+            if (dispatchTimes.length >= 6 || (dispatchTimes.length && Date.now() - Math.max(...dispatchTimes) < 30 * 60000)) {
+              core.info('Recovery dispatch limit or cooldown reached.');
+              return;
+            }
+            if (hour >= 10) {
+              core.info('Morning recovery deadline reached.');
+              return;
             }
             if (!allowed) {
               core.info('Read-only check; this event does not request recovery.');
@@ -178,6 +187,59 @@ jobs:
           url = "{}/{}/actions/runs/{}".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
           detail = "今日投递状态暂无法核实。" if os.environ["GUARD_OUTCOME"] != "success" else "请查看本次运行。"
           send_email(config, f"<p>文献邮件自动监督出现故障。{detail}</p><p><a href=\"{url}\">查看本次 Actions 运行</a></p>", subject=f"Eat Paper Daily {today}（监督故障）")
+          '
+
+  morning-deadline:
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: daily-email-morning-notice
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Check deadline
+        id: time
+        run: echo "due=$(TZ=Asia/Shanghai date +%H | awk '{if ($1 >= 10) print "true"; else print "false"}')" >> "$GITHUB_OUTPUT"
+      - name: Check delivery and morning notices
+        if: steps.time.outputs.due == 'true'
+        id: guard
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTICE_KIND: morning
+        run: python3 scripts/daily_delivery_guard.py
+      - name: Setup uv
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        uses: astral-sh/setup-uv@v7
+      - name: Send morning deadline notice
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        env:
+          PYTHONPATH: src
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          SENDER: ${{ secrets.SENDER }}
+          RECEIVER: ${{ secrets.RECEIVER }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run --no-project --with hydra-core --with loguru python -c '
+          import os
+          from datetime import datetime, timedelta, timezone
+          from hydra import compose, initialize_config_dir
+          from zotero_arxiv_daily.utils import send_email
+          with initialize_config_dir(version_base=None, config_dir=os.path.abspath("config")):
+              config = compose(config_name="default")
+          now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M")
+          url = "{}/{}/actions".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"])
+          detail = "投递状态暂无法核实" if os.environ["GUARD_OUTCOME"] != "success" else "尚未成功投递今日文献日报"
+          send_email(config, f"<p>截至 {now}（北京时间）{detail}，目标为 10 篇。当前可能正在生成或失败待恢复，请查看 Actions。</p><p><a href=\"{url}\">查看 Actions</a></p>", subject=f"Eat Paper Daily {now}（日报截止状态）")
           '
 
   keep-alive:

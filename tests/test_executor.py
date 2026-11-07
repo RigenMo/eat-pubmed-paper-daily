@@ -116,7 +116,7 @@ def test_executor_passes_configured_llm_timeout_to_openai(config, monkeypatch):
     Executor(config)
 
     assert captured["timeout"] == 1234.0
-    assert captured["max_retries"] == 1
+    assert captured["max_retries"] == 0
 
 
 def test_executor_applies_debug_limit_after_reranking(config, monkeypatch):
