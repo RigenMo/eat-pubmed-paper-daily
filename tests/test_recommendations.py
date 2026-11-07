@@ -389,17 +389,40 @@ def test_all_request_failures_safe_and_bounded(status):
     assert len(client.calls) == (1 if status in (401, 429) else 7)
 
 
-def test_invalid_quote_does_not_mutate_earlier_papers():
+def test_invalid_quote_isolates_later_batch():
     papers = [_paper_with_anchor(), _paper_with_anchor()]
-    original = [list(p.recommendation_matches) for p in papers]
     calls = []
     def payload(ids, _):
         calls.append(ids)
         return {"recommendations": [{"id": ids[0], "related": True, "anchor_index": 0,
             "reason": "Direct relation.", "candidate_quote": "dietary protein timing" if len(calls) == 1 else "invented phrase", "anchor_quote": "meal timing and dietary protein"}]}
-    with pytest.raises(RecommendationVerificationError):
-        verify_recommendations(papers, _DeterministicClient(payload), {}, batch_size=1)
-    assert [p.recommendation_matches for p in papers] == original
+    audit = []
+    result = verify_recommendations(papers, _DeterministicClient(payload), {}, batch_size=1, audit=audit)
+    assert len(result) == 1 and result[0] is papers[0]
+    assert not papers[1].recommendation_matches
+    assert any(row.get("status") == "verification_unavailable" for row in audit)
+
+
+def test_correction_502_isolates_batch_and_keeps_valid_result():
+    papers = [_paper_with_anchor(), _paper_with_anchor()]
+    client = _DeterministicClient(lambda ids, _: {"recommendations": [{"id": ids[0], "related": True, "reason": "Direct relationship.", "anchor_index": 0, "candidate_quote": "dietary protein timing", "anchor_quote": "meal timing and dietary protein"}]})
+    original = client.create
+    class Failure(Exception):
+        status_code = 502
+    def create(**kwargs):
+        if len(client.calls) == 1:
+            client.calls.append(kwargs)
+            return _chat_response({"invalid": []})
+        if len(client.calls) >= 2:
+            client.calls.append(kwargs)
+            raise Failure("secret")
+        return original(**kwargs)
+    client.chat.completions.create = create
+    audit = []
+    result = verify_recommendations(papers, client, {}, batch_size=1, audit=audit)
+    assert len(result) == 1 and result[0] is papers[0]
+    assert not papers[1].recommendation_matches
+    assert any(row.get("status") == "verification_unavailable" for row in audit)
 
 
 def test_three_split_recoveries_process_every_candidate():
