@@ -20,10 +20,18 @@ jobs:
         with:
           ref: main
 
+      - name: Check remaining day target
+        id: guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/daily_delivery_guard.py
+
       - name: Setup uv
+        if: steps.guard.outputs.day_complete == 'false' && steps.guard.outputs.delivery_unknown == 'false'
         uses: astral-sh/setup-uv@v7
 
       - name: Send missing cards
+        if: steps.guard.outputs.day_complete == 'false' && steps.guard.outputs.delivery_unknown == 'false'
         id: send
         env:
           PYTHONPATH: src:.
