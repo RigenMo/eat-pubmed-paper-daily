@@ -93,6 +93,10 @@ class _RecommendationValidationError(ValueError):
     """Internal error used to trigger the single correction retry."""
 
 
+class _InvalidBatch(RecommendationVerificationError):
+    """A batch remained invalid after its correction attempt."""
+
+
 def _normalise_title(value: Any) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
@@ -723,10 +727,9 @@ def verify_recommendations(
 ) -> list[Paper]:
     """Filter papers through a conservative, corpus-grounded LLM gate.
 
-    All response batches are validated before any Paper is mutated.  A
+    All response batches are processed before any Paper is mutated. A
     malformed response gets one correction retry with identical source
-    material; a second failure raises a safe exception instead of allowing
-    unverified papers through.
+    material; an invalid batch is excluded from the verified results.
     """
 
     if int(batch_size) <= 0:
@@ -750,25 +753,17 @@ def verify_recommendations(
             if child:
                 if extra_requests >= 6:
                     if attempt:
-                        raise RecommendationVerificationError("Recommendation verification response failed closed validation")
+                        raise _InvalidBatch("Recommendation verification response failed closed validation")
                     raise _RequestError(TimeoutError())
                 extra_requests += 1
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                if attempt:
-                    raise RecommendationVerificationError("Recommendation verification response failed closed validation")
                 raise _RequestError(TimeoutError())
             try:
                 content = _request_batch(openai_client, llm_params, material,
                                          correction=_CORRECTION_PROMPT if attempt else None,
                                          timeout=min(120, remaining))
-            except _RequestError as error:
-                if attempt:
-                    if error.fatal:
-                        raise
-                    raise RecommendationVerificationError(
-                        f"Recommendation verification response failed closed validation ({error})"
-                    ) from None
+            except _RequestError:
                 raise
             try:
                 validated = _parse_and_validate(content, records)
@@ -778,7 +773,7 @@ def verify_recommendations(
                 return
             except _RecommendationValidationError:
                 if attempt == 1:
-                    raise RecommendationVerificationError(
+                    raise _InvalidBatch(
                         "Recommendation verification response failed closed validation"
                     ) from None
 
@@ -789,6 +784,11 @@ def verify_recommendations(
         try:
             process(batch, batch_offset)
             consecutive_failures = 0
+            continue
+        except _InvalidBatch as error:
+            logger.warning("{}", error)
+            last_error = error
+            unavailable.extend(batch)
             continue
         except _RequestError as error:
             logger.warning("Recommendation verification request failed: {}", error)
@@ -804,6 +804,10 @@ def verify_recommendations(
                 try:
                     process(child, offset, child=True)
                     consecutive_failures = 0
+                except _InvalidBatch as error:
+                    logger.warning("{}", error)
+                    last_error = error
+                    unavailable.extend(child)
                 except _RequestError as error:
                     logger.warning("Recommendation verification request failed: {}", error)
                     if error.fatal:
@@ -812,7 +816,7 @@ def verify_recommendations(
                     unavailable.extend(child)
         else:
             unavailable.extend(batch)
-        if last_error.fatal or consecutive_failures >= 3 or time.monotonic() >= deadline:
+        if consecutive_failures >= 3 or time.monotonic() >= deadline:
             unavailable.extend(source_papers[batch_offset + len(batch):])
             break
 
@@ -861,6 +865,8 @@ def verify_recommendations(
             }
         ]
         verified_papers.append(paper)
+    logger.info("Recommendation verification summary: valid_responses={}, verified={}, unavailable={}",
+                valid_responses, len(verified_papers), len(unavailable))
     return verified_papers
 
 
