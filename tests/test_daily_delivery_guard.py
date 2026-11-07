@@ -151,3 +151,42 @@ def test_watchdog_current_run_previous_notice(monkeypatch):
     monkeypatch.setattr(guard, 'api_pages', pages)
     monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
     assert guard.delivery_status('owner/repo', 'token', 9, NOW) == (False, True)
+
+
+def test_morning_notice_is_independent_and_not_delivery(monkeypatch):
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            return iter([{'id': 7}] if 'keep-alive.yml' in url else [])
+        return iter([
+            {'name': 'notify-on-failure', 'steps': [{'name': 'Send supervisor failure notice', 'conclusion': 'success', 'completed_at': '2026-11-02T17:00:00Z'}]},
+            {'name': 'morning-deadline', 'steps': [{'name': 'Send morning deadline notice', 'conclusion': 'success', 'completed_at': '2026-11-03T02:10:00Z'}]},
+        ])
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
+    assert guard.delivery_status('owner/repo', 'token', None, NOW) == (False, True)
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, 'morning') == (False, True)
+    assert guard.delivery_status('owner/repo', 'token', None, datetime(2026, 11, 2, 15, tzinfo=timezone.utc), 'morning') == (False, False)
+
+
+def test_failure_notice_does_not_suppress_morning(monkeypatch):
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            return iter([{'id': 7}] if 'keep-alive.yml' in url else [])
+        return iter([{'name': 'notify-on-failure', 'steps': [{'name': 'Send supervisor failure notice', 'conclusion': 'success', 'completed_at': '2026-11-02T17:00:00Z'}]}])
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, 'morning') == (False, False)
+
+
+def test_in_progress_workflow_notice_and_queued_job(monkeypatch):
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            assert 'status=completed' not in url
+            return iter([{'id': 7, 'status': 'in_progress'}] if 'keep-alive.yml' in url else [])
+        return iter([
+            {'name': 'queued', 'steps': None},
+            {'name': 'morning-deadline', 'steps': [{'name': 'Send morning deadline notice', 'conclusion': 'success', 'completed_at': '2026-11-03T02:10:00Z'}]},
+        ])
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, 'morning') == (False, True)

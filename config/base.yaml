@@ -44,6 +44,10 @@ email:
   sender_password: ??? # The password of the sender account. Note that it's not necessarily the password for logging in the e-mail client, but the authentication code for SMTP service. Ask your email provider for this. Example: abcdefghijklmn
 
 llm:
+  fallback_models: [kimi-k3, glm-5.3, deepseek-v4.1-flash, qwen3.8-max]
+  fallback_total_timeout: 240
+  fallback_model_timeout: 90
+  fallback_cooldown: 900
   api:
     key: ??? # API Key of your LLM API. Example: sk-xxx
     base_url: ??? # API URL of your LLM API. Example: https://api.openai.com/v1
