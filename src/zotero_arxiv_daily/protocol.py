@@ -125,7 +125,7 @@ class Paper:
             self.title_zh = title_zh
             return title_zh
         except Exception as e:
-            logger.warning(f"Failed to translate title of {self.url}: {e}")
+            logger.warning(f"Failed to translate title of {self.url}: {type(e).__name__} (status={getattr(e, 'status_code', None)})")
             return None
 
     @staticmethod
@@ -574,7 +574,7 @@ class Paper:
                 self.tldr = self._format_reader_output(payload)
             return self.tldr
         except Exception as e:
-            logger.warning(f"Failed to generate tldr of {self.url}: {e}")
+            logger.warning(f"Failed to generate tldr of {self.url}: {type(e).__name__} (status={getattr(e, 'status_code', None)})")
             self.reading_card = None
             if self.abstract_zh:
                 self.reader_status = "partial"
@@ -632,7 +632,7 @@ class Paper:
                 self.affiliations = affiliations
             return affiliations
         except Exception as e:
-            logger.warning(f"Failed to generate affiliations of {self.url}: {e}")
+            logger.warning(f"Failed to generate affiliations of {self.url}: {type(e).__name__} (status={getattr(e, 'status_code', None)})")
             return None
 @dataclass
 class CorpusPaper:

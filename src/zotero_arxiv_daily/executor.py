@@ -23,6 +23,7 @@ from .innovation import assess_innovation
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
 from .utils import send_email
 from openai import OpenAI
+from .llm_client import FailoverClient
 from tqdm import tqdm
 
 # Maps source.mix_mode (1-5) to (pubmed_ratio, arxiv_ratio)
@@ -58,12 +59,20 @@ class Executor:
         self.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, "ignore_path")
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
         llm_timeout = float(config.llm.api.get("timeout", 600))
+        fallback_models = config.llm.get("fallback_models", [])
         self.openai_client = OpenAI(
             api_key=config.llm.api.key,
             base_url=config.llm.api.base_url,
             timeout=llm_timeout,
-            max_retries=int(config.llm.api.get("max_retries", 1)),
+            max_retries=0 if fallback_models else int(config.llm.api.get("max_retries", 1)),
         )
+        if fallback_models:
+            self.openai_client = FailoverClient(
+                self.openai_client, fallback_models,
+                total_timeout=config.llm.get("fallback_total_timeout", 240),
+                model_timeout=config.llm.get("fallback_model_timeout", 90),
+                cooldown=config.llm.get("fallback_cooldown", 900),
+            )
 
         # Validate search mode vs keywords
         search_mode = int(config.search.mode)
@@ -309,7 +318,7 @@ class Executor:
             body = _re.sub(r"\s*——\s*" + _re.escape(char_name) + r"[^\n]*$", "", body).strip()
             return f"{body}\n\n——{char_name}"
         except Exception as e:
-            logger.warning(f"Failed to generate email summary: {e}")
+            logger.warning(f"Failed to generate email summary: {type(e).__name__} (status={getattr(e, 'status_code', None)})")
             return ""
 
     # ------------------------------------------------------------------
