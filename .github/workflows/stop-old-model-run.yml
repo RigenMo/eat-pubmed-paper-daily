@@ -1,0 +1,29 @@
+name: Stop outdated single-model repair
+on:
+  push:
+    branches: [codex/cancel-old-model-run-20261107]
+permissions:
+  actions: write
+jobs:
+  stop-old-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const run_id = 42325258326;
+            const run = await github.rest.actions.getWorkflowRun({...context.repo, run_id});
+            if (run.data.head_sha !== 'e5c5faa1dd16da53a9d0509e803f21541ceb005b') throw new Error('Unexpected old run version');
+            if (run.data.status === 'completed') {
+              core.info('Old run already finished; no cancellation sent.');
+              return;
+            }
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {...context.repo,run_id,per_page:100});
+            const sendFinished = jobs.some(job => job.name === 'calculate-and-send' && (job.steps || []).some(step=>step.name==='Run script' && step.conclusion==='success'));
+            if (sendFinished) {
+              core.info('Sender step already finished; inspect delivery before any further action.');
+              return;
+            }
+            await github.rest.actions.cancelWorkflowRun({...context.repo,run_id});
+            core.info('Requested cancellation of the outdated single-model run; no new sender dispatched.');
