@@ -1,4 +1,4 @@
-name: Request authorized multi-model recovery
+name: Request healthy-model delivery after stale queue clears
 on:
   push:
     branches: [codex/repair-send-once-20261107]
@@ -39,4 +39,4 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               ...context.repo, workflow_id: 'main.yml', ref: 'main'
             });
-            core.info('Requested one authorized multi-model repair after confirming no delivery; this is not natural-schedule acceptance.');
+            core.info('Requested authorized healthy-model delivery after obsolete sender runs ended; this is late repair, not natural-schedule acceptance.');
