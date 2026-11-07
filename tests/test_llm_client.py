@@ -1,3 +1,5 @@
+import asyncio
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -132,3 +134,65 @@ def test_explicit_primary_outside_fallback_list_is_preserved():
         return "ok"
     assert client_with(create).create(model="configured-primary") == "ok"
     assert calls == ["configured-primary"]
+
+
+def test_only_healthy_model_receives_its_full_share():
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+    client = client_with(create)
+    client.failed_until = {model: 100 for model in MODELS[:3]}
+    client.preferred = MODELS[3]
+    assert client.create(model=MODELS[0], timeout=120) == "ok"
+    assert calls[0]["model"] == MODELS[3]
+    assert calls[0]["timeout"] == 90
+
+
+def test_real_client_async_deadline_cancels_and_closes(monkeypatch):
+    calls = []
+    closed = []
+    cancelled = []
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            assert kwargs["max_retries"] == 0
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            closed.append(True)
+        async def create(self, **kwargs):
+            calls.append(kwargs["model"])
+            if len(calls) == 1:
+                try:
+                    while True:
+                        await asyncio.sleep(0.005)
+                except asyncio.CancelledError:
+                    cancelled.append(True)
+                    raise
+            return "ok"
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
+    real = openai.OpenAI(api_key="secret-test-key", base_url="https://example.test/v1", max_retries=0)
+    client = FailoverClient(real, MODELS, total_timeout=0.4, model_timeout=0.1)
+    start = time.monotonic()
+    try:
+        assert client.create(model=MODELS[0]) == "ok"
+    finally:
+        real.close()
+    assert time.monotonic() - start < 2
+    assert calls == MODELS[:2]
+    assert cancelled == [True]
+    assert len(closed) == 2
+
+
+def test_preferred_healthy_model_keeps_full_timeout_when_others_recover():
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        return "ok"
+    client = client_with(create, lambda: 1000)
+    client.failed_until = {MODELS[0]: 900, MODELS[1]: 999}
+    client.preferred = MODELS[3]
+    assert client.create(model=MODELS[0], timeout=120) == "ok"
+    assert calls[0]["model"] == MODELS[3]
+    assert calls[0]["timeout"] == 90
