@@ -1,0 +1,43 @@
+name: Probe authorized fallback model routes
+on:
+  push:
+    branches: [codex/probe-fallback-models-20261107]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Check only public model health without email or Zotero
+        run: |
+          uv run --no-project --with openai python - <<'PY'
+          import json,os,time,logging
+          from concurrent.futures import ThreadPoolExecutor,as_completed
+          from openai import OpenAI
+          logging.disable(logging.CRITICAL)
+          models=['kimi-k3','glm-5.3','deepseek-v4.1-flash','qwen3.8-max']
+          def probe(model):
+              start=time.monotonic()
+              result={'model':model}
+              client=OpenAI(api_key=os.environ['OPENAI_API_KEY'],base_url='https://llm.goaichat.top/v1',timeout=60,max_retries=0)
+              try:
+                  response=client.chat.completions.create(model=model,max_tokens=65536,response_format={'type':'json_object'},messages=[{'role':'user','content':'Return only a JSON object with ok=true.'}])
+                  result.update(success=True,has_content=bool(response.choices[0].message.content))
+              except Exception as error:
+                  status=getattr(error,'status_code',None)
+                  code=getattr(error,'code',None)
+                  allowed={'insufficient_quota','insufficient_user_quota','context_length_exceeded','model_not_found','invalid_api_key','rate_limit_exceeded'}
+                  result.update(success=False,error_type=type(error).__name__,http_status=status if type(status) is int else None,code=code if isinstance(code,str) and code in allowed else None)
+              finally:
+                  client.close()
+              result['elapsed_seconds']=round(time.monotonic()-start,2)
+              return result
+          with ThreadPoolExecutor(max_workers=2) as pool:
+              for future in as_completed([pool.submit(probe,model) for model in models]):
+                  print('PUBLIC_MODEL_HEALTH '+json.dumps(future.result(),ensure_ascii=False),flush=True)
+          PY
