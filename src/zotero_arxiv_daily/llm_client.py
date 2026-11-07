@@ -1,5 +1,8 @@
 """Bounded failover for chat completions on one OpenAI-compatible endpoint."""
+import asyncio
 import time
+
+import httpx
 from types import SimpleNamespace
 
 import openai
@@ -17,6 +20,23 @@ class FailoverClient:
         self.failed_until = {}
         self.preferred = None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    async def _async_create(self, attempt):
+        client = openai.AsyncOpenAI(
+            api_key=self._client.api_key,
+            base_url=str(self._client.base_url),
+            organization=self._client.organization,
+            project=self._client.project,
+            max_retries=0,
+        )
+        async with client:
+            try:
+                return await asyncio.wait_for(
+                    client.chat.completions.create(**attempt), timeout=attempt["timeout"]
+                )
+            except asyncio.TimeoutError:
+                request = httpx.Request("POST", str(self._client.base_url))
+                raise openai.APITimeoutError(request=request) from None
 
     def create(self, **kwargs):
         requested = kwargs.get("model")
@@ -43,9 +63,15 @@ class FailoverClient:
             remaining = deadline - self.clock()
             if remaining <= 0:
                 break
-            attempt = dict(kwargs, model=model, timeout=min(self.model_timeout, remaining / (len(available) - index)))
+            count = len(healthy) - index if index < len(healthy) else len(available) - index
+            if model == self.preferred and model in healthy:
+                count = 1
+            attempt = dict(kwargs, model=model, timeout=min(self.model_timeout, remaining / count))
             try:
-                result = self._client.chat.completions.create(**attempt)
+                if isinstance(self._client, openai.OpenAI):
+                    result = asyncio.run(self._async_create(attempt))
+                else:
+                    result = self._client.chat.completions.create(**attempt)
             except (openai.APIConnectionError, openai.APIStatusError) as error:
                 status = getattr(error, "status_code", None)
                 body = getattr(error, "body", None)
