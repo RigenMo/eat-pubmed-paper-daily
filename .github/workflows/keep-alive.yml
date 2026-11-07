@@ -50,7 +50,9 @@ jobs:
         id: prepare
         uses: actions/github-script@v8
         env:
-          DELIVERED: ${{ steps.guard.outputs.delivered }}
+          DAY_COMPLETE: ${{ steps.guard.outputs.day_complete }}
+          PAPER_COUNT: ${{ steps.guard.outputs.paper_count }}
+          DELIVERY_UNKNOWN: ${{ steps.guard.outputs.delivery_unknown }}
           EVENT_NAME: ${{ github.event_name }}
           RECOVER: ${{ inputs.recover }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
@@ -76,14 +78,17 @@ jobs:
               if (updated.data.state !== 'active') throw new Error('Main workflow is still disabled');
             }
             core.setOutput('needs_dispatch', 'false');
-            if (process.env.DELIVERED === 'true') {
-              core.info('Email already delivered today.');
+            if (process.env.DAY_COMPLETE === 'true' || process.env.DELIVERY_UNKNOWN !== 'false') {
+              core.info('Daily target met or delivery status unknown.');
               return;
             }
             const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
               owner, repo, workflow_id, per_page: 100
             });
-            if (runs.some(run => run.status !== 'completed')) {
+            const supplements = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id: 'supplement.yml', per_page: 100
+            });
+            if ([...runs, ...supplements].some(run => run.status !== 'completed')) {
               core.info('A main workflow run is still active or queued.');
               return;
             }
@@ -126,6 +131,7 @@ jobs:
             }
             const repository = await github.rest.repos.get({ owner, repo });
             core.setOutput('ref', repository.data.default_branch);
+            core.setOutput('workflow_id', Number(process.env.PAPER_COUNT) > 0 ? 'supplement.yml' : 'main.yml');
             core.setOutput('needs_dispatch', 'true');
 
       - name: Dispatch missing daily email
@@ -133,10 +139,11 @@ jobs:
         uses: actions/github-script@v8
         env:
           TARGET_REF: ${{ steps.prepare.outputs.ref }}
+          TARGET_WORKFLOW: ${{ steps.prepare.outputs.workflow_id }}
         with:
           script: |
             await github.rest.actions.createWorkflowDispatch({
-              ...context.repo, workflow_id: 'main.yml', ref: process.env.TARGET_REF
+              ...context.repo, workflow_id: process.env.TARGET_WORKFLOW, ref: process.env.TARGET_REF
             });
             core.info('Requested one recovery run of main.yml.');
 
@@ -217,13 +224,15 @@ jobs:
           NOTICE_KIND: morning
         run: python3 scripts/daily_delivery_guard.py
       - name: Setup uv
-        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
         uses: astral-sh/setup-uv@v7
       - name: Send morning deadline notice
-        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && steps.guard.outputs.delivered == 'false' && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
         env:
           PYTHONPATH: src
           GUARD_OUTCOME: ${{ steps.guard.outcome }}
+          PAPER_COUNT: ${{ steps.guard.outputs.paper_count }}
+          DELIVERY_UNKNOWN: ${{ steps.guard.outputs.delivery_unknown }}
           SENDER: ${{ secrets.SENDER }}
           RECEIVER: ${{ secrets.RECEIVER }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
@@ -239,8 +248,12 @@ jobs:
               config = compose(config_name="default")
           now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M")
           url = "{}/{}/actions".format(os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"])
-          detail = "投递状态暂无法核实" if os.environ["GUARD_OUTCOME"] != "success" else "尚未成功投递今日文献日报"
-          send_email(config, f"<p>截至 {now}（北京时间）{detail}，目标为 10 篇。当前可能正在生成或失败待恢复，请查看 Actions。</p><p><a href=\"{url}\">查看 Actions</a></p>", subject=f"Eat Paper Daily {now}（日报截止状态）")
+          if os.environ["GUARD_OUTCOME"] != "success" or os.environ["DELIVERY_UNKNOWN"] == "true":
+              detail = "回执信息暂无法核实，不能确认完整份数"
+          else:
+              count = int(os.environ["PAPER_COUNT"])
+              detail = f"已确认 {count}/10 篇完整精读，尚缺 {max(0, 10-count)} 篇"
+          send_email(config, f"<p>截至 {now}（北京时间），{detail}。当前可能正在生成或失败待恢复，请查看 Actions。</p><p><a href=\"{url}\">查看 Actions</a></p>", subject=f"Eat Paper Daily {now}（日报截止状态）")
           '
 
   keep-alive:

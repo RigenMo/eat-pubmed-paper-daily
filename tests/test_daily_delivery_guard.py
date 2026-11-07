@@ -190,3 +190,59 @@ def test_in_progress_workflow_notice_and_queued_job(monkeypatch):
     monkeypatch.setattr(guard, 'api_pages', pages)
     monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
     assert guard.delivery_status('owner/repo', 'token', None, NOW, 'morning') == (False, True)
+
+
+def test_progress_combines_receipts_and_deduplicates(monkeypatch):
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            if 'main.yml' in url:
+                return iter([{'id': 5}])
+            if 'supplement.yml' in url:
+                return iter([{'id': 6}])
+            return iter([])
+        return iter([])
+    def get_receipt(repo, token, run_id):
+        value = receipt()
+        ids = range(8) if run_id == '5' else (7, 8, 9)
+        value.update(paper_count=len(ids), complete_cards=len(ids), papers=[{'url': str(i)} for i in ids])
+        return value
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    monkeypatch.setattr(guard, 'load_delivery_receipt', get_receipt)
+    progress = {}
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, progress=progress) == (True, False)
+    assert progress == {'paper_count': 10, 'day_complete': True, 'delivery_unknown': False}
+
+
+def test_incomplete_cards_and_missing_receipt_are_unknown(monkeypatch):
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            return iter([{'id': 5}] if 'main.yml' in url else [])
+        return iter([{'name': 'calculate-and-send', 'steps': [{'name': 'Run script', 'conclusion': 'success', 'completed_at': '2026-11-02T17:00:00Z'}]}])
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    value = receipt()
+    value['complete_cards'] = 0
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: value)
+    progress = {}
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, progress=progress)[0]
+    assert progress == {'paper_count': 0, 'day_complete': False, 'delivery_unknown': True}
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: None)
+    guard.delivery_status('owner/repo', 'token', None, NOW, progress=progress)
+    assert progress['delivery_unknown'] and not progress['day_complete']
+
+
+def test_previous_day_receipt_precedes_today_step_but_attempt_mismatch_unknown(monkeypatch):
+    job = {'name': 'calculate-and-send', 'run_attempt': 1, 'steps': [{'name': 'Run script', 'conclusion': 'success', 'completed_at': '2026-11-02T16:01:00Z'}]}
+    def pages(url, token, key):
+        if key == 'workflow_runs':
+            return iter([{'id': 5}] if 'main.yml' in url else [])
+        return iter([job])
+    old = receipt()
+    old['date'] = '2026-11-02'
+    monkeypatch.setattr(guard, 'api_pages', pages)
+    monkeypatch.setattr(guard, 'load_delivery_receipt', lambda *args: old)
+    progress = {}
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, progress=progress) == (False, False)
+    assert not progress['delivery_unknown'] and progress['paper_count'] == 0
+    job['run_attempt'] = 2
+    assert guard.delivery_status('owner/repo', 'token', None, NOW, progress=progress)[0]
+    assert progress['delivery_unknown']

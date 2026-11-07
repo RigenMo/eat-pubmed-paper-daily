@@ -577,6 +577,9 @@ class Executor:
                 raise RuntimeError("No complete reading cards were generated; email was not sent.")
             reranked_papers = selected
 
+        if send_mail and verify_related and recommendation_config.get("require_cards", False) and not reranked_papers:
+            raise RuntimeError("No qualifying complete papers; no empty digest email was sent.")
+
         if not reranked_papers and not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return 0

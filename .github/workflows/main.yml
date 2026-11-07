@@ -124,6 +124,30 @@ jobs:
             });
             core.info('Automatic supervision requested for sender run ' + context.runId + '; recover=' + failed);
 
+      - name: Complete missing paper cards
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v8
+        env:
+          SEND_OUTCOME: ${{ needs.calculate-and-send.outputs.send_outcome }}
+          QUALITY_PASSED: ${{ needs.calculate-and-send.outputs.quality_passed }}
+          COMPLETE_CARDS: ${{ needs.calculate-and-send.outputs.complete_cards }}
+          EXPECTED_CARDS: ${{ needs.calculate-and-send.outputs.expected_cards }}
+        with:
+          script: |
+            const complete = Number(process.env.COMPLETE_CARDS);
+            const expected = Number(process.env.EXPECTED_CARDS);
+            const hour = Number(new Intl.DateTimeFormat('en-GB', {timeZone: 'Asia/Shanghai', hour: '2-digit', hourCycle: 'h23'}).format(new Date()));
+            if (process.env.SEND_OUTCOME !== 'success' || process.env.QUALITY_PASSED !== 'false' ||
+                !/^\d+$/.test(process.env.COMPLETE_CARDS) || !/^\d+$/.test(process.env.EXPECTED_CARDS) ||
+                complete <= 0 || complete >= expected || hour >= 12) return;
+            const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              ...context.repo, workflow_id: 'supplement.yml', per_page: 100, created: '>=' + new Date(Date.now() - 48 * 3600000).toISOString().slice(0, 10)
+            });
+            const todaysRuns = runs.filter(r => new Date(new Date(r.created_at).getTime() + 8 * 3600000).toISOString().slice(0, 10) === today);
+            if (todaysRuns.length >= 2) return;
+            await github.rest.actions.createWorkflowDispatch({...context.repo, workflow_id: 'supplement.yml', ref: 'main'});
+
   notify-on-failure:
     needs: calculate-and-send
     concurrency:
