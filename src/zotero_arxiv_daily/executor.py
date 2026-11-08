@@ -21,6 +21,7 @@ from .journal_metrics import enrich_journal_metrics
 from .recommendations import build_zotero_queries, verify_recommendations
 from .innovation import assess_innovation
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
+from .paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from .utils import send_email
 from openai import OpenAI
 from .llm_client import FailoverClient
@@ -359,6 +360,9 @@ class Executor:
     def run(self, send_mail: bool = True):
         journals_config = self.config.get("journals", {})
         recommendation_config = self.config.get("recommendations", {})
+        exclude_sent = bool(recommendation_config.get("exclude_sent", True))
+        history_path = Path(os.environ.get("SENT_PAPER_HISTORY_FILE", ".cache/sent-paper-history.json"))
+        history = load_history(history_path, required=send_mail and os.environ.get("GITHUB_ACTIONS", "").lower() == "true") if exclude_sent else None
         verify_related = bool(recommendation_config.get("enabled", False)) and self._search_mode > 1
         focus_mode = effective_focus_mode(recommendation_config) if verify_related else "balanced"
         self.focus_mode = focus_mode
@@ -417,6 +421,11 @@ class Executor:
         logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
         if failed_sources == len(self.retrievers):
             raise RuntimeError("All literature sources failed; no email was sent.")
+
+        if exclude_sent:
+            before = len(all_papers)
+            all_papers = filter_unseen(all_papers, set(history["entries"]))
+            logger.info(f"Sent-history filter: {before} to {len(all_papers)} candidates")
 
         # Preprints have no journal IF. Live mode checks journals dynamically
         # after ranking; the explicit legacy mode retains its static gate.
@@ -602,6 +611,12 @@ class Executor:
         logger.info("Sending email...")
         send_email(self.config, email_content)
         logger.info(f"Email sent successfully ({len(reranked_papers)} papers)")
+        if exclude_sent:
+            try:
+                day = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
+                record_sent(history_path, reranked_papers, day)
+            except Exception:
+                logger.exception("SMTP succeeded but recording sent-paper history failed")
         # SMTP has already accepted the message. A receipt failure must never
         # turn that successful send into a retryable SMTP failure.
         try:
@@ -621,7 +636,7 @@ class Executor:
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),
                 "papers": [
                     {"url": p.url, "journal": p.journal, "publication_date": p.publication_date,
-                     "jif": (p.journal_metrics or {}).get("jif")}
+                     "jif": (p.journal_metrics or {}).get("jif"), "identity_keys": sorted(paper_keys(p))}
                     for p in reranked_papers
                 ],
             }

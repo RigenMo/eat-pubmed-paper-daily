@@ -16,6 +16,9 @@ concurrency:
 
 jobs:
   calculate-and-send:
+    permissions:
+      contents: write
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
@@ -41,10 +44,20 @@ jobs:
         if: steps.guard.outputs.delivered != 'true'
         uses: astral-sh/setup-uv@v7
 
+      - name: Prepare sent paper history
+        if: steps.guard.outputs.delivered != 'true'
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+          SENT_PAPER_HISTORY_FILE: .cache/sent-paper-history.json
+        run: python3 scripts/sent_paper_history.py prepare
+
       - name: Run script
         id: send
         if: steps.guard.outputs.delivered != 'true'
         env:
+          PYTHONPATH: src:.
+          SENT_PAPER_HISTORY_FILE: .cache/sent-paper-history.json
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           SENDER: ${{ secrets.SENDER }}
@@ -58,7 +71,7 @@ jobs:
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
-          uv run src/zotero_arxiv_daily/main.py executor.send_empty=true executor.debug=false executor.max_paper_num=10 search.mode=5 source.mix_mode=1 llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.enabled=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
+          uv run src/zotero_arxiv_daily/main.py executor.send_empty=true executor.debug=false executor.max_paper_num=10 search.mode=5 source.mix_mode=1 llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
 
       - name: Read delivery receipt
         id: receipt
@@ -84,6 +97,14 @@ jobs:
           print('Delivery quality:', fields)
           PY
 
+      - name: Save sent paper history
+        if: always()
+        continue-on-error: true
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/sent_paper_history.py save
+
       - name: Upload delivery receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -91,7 +112,7 @@ jobs:
           name: daily-delivery-receipt-${{ github.run_attempt }}
           path: outputs/delivery-receipt.json
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 90
 
       - name: Upload recommendation decisions
         if: always()
