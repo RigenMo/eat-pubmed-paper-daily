@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, build_opener
 
 import hydra
@@ -17,17 +17,18 @@ from zotero_arxiv_daily.executor import Executor
 from zotero_arxiv_daily.construct_email import render_email
 from zotero_arxiv_daily.innovation import assess_innovation
 from zotero_arxiv_daily.journal_metrics import enrich_journal_metrics
+from zotero_arxiv_daily.paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from zotero_arxiv_daily.reading_preferences import effective_focus_mode, focus_evidence, order_candidates
 from zotero_arxiv_daily.recommendations import verify_recommendations
 from zotero_arxiv_daily.retriever.pubmed_retriever import _publication_in_window
 from zotero_arxiv_daily.utils import send_email
 
-URL = re.compile(r'https://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?')
 READ = re.compile(r'Reading candidate \d+; completed \d+/\d+: (https://pubmed\.ncbi\.nlm\.nih\.gov/\d+/?)')
 
 
 def pmid(url):
-    match = URL.fullmatch(url)
+    parts = urlsplit(url)
+    match = re.fullmatch(r'/(?:pubmed/)?(\d+)/?', parts.path, flags=re.I) if (parts.hostname or '').casefold() in ('pubmed.ncbi.nlm.nih.gov', 'www.ncbi.nlm.nih.gov', 'ncbi.nlm.nih.gov') else None
     if not match:
         raise ValueError('Invalid receipt PubMed URL')
     return match.group(1)
@@ -151,6 +152,20 @@ def supplement(config, progress=None):
     start = today - timedelta(days=int(settings.get('publication_days', 90)))
     eligible = [by_id[identifier] for identifier in candidates if identifier in by_id and
                 _publication_in_window(by_id[identifier].publication_date, start, today)]
+    # Today's count is independent of the long-term ledger; only new candidates
+    # are filtered, before journal lookups, verification and reading generation.
+    history_path = Path(os.environ.get('SENT_PAPER_HISTORY_FILE', '.cache/sent-paper-history.json'))
+    if settings.get('exclude_sent', True):
+        history = load_history(history_path, required=os.environ.get('GITHUB_ACTIONS', '').lower() == 'true')
+        seen = set(history['entries'])
+    else:
+        seen = set()
+    for receipt in receipts:
+        for paper in receipt['papers']:
+            seen.update(paper_keys(paper))
+    eligible = filter_unseen(eligible, seen)
+    if not eligible:
+        raise RuntimeError('No unseen eligible candidates; no email sent')
     eligible = enrich_journal_metrics(eligible, config.journals)
     corpus = executor.filter_corpus(executor.fetch_zotero_corpus())
     if not corpus:
@@ -196,6 +211,11 @@ def supplement(config, progress=None):
     progress['retry_safe'] = False
     print('SUPPLEMENT_SMTP_STARTED', flush=True)
     send_email(config, html, subject=f'Eat Paper Daily {today:%Y/%m/%d}（补充{count}篇，今日累计{total}/10）')
+    if settings.get('exclude_sent', True):
+        try:
+            record_sent(history_path, selected, today)
+        except Exception:
+            print('SMTP accepted; local sent-paper history write failed. Reconcile from receipt.')
     receipt_written = False
     try:
         confirmed = datetime.now(timezone.utc)
@@ -207,7 +227,8 @@ def supplement(config, progress=None):
                    'quality_passed': True, 'day_expected_cards': 10, 'day_complete_cards': total,
                    'is_supplement': True,
                    'papers': [{'url': p.url, 'journal': p.journal, 'publication_date': p.publication_date,
-                               'jif': (p.journal_metrics or {}).get('jif')} for p in selected]}
+                               'jif': (p.journal_metrics or {}).get('jif'),
+                               'identity_keys': sorted(paper_keys(p))} for p in selected]}
         output = Path('outputs/delivery-receipt.json')
         output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=output.parent, delete=False) as temp:

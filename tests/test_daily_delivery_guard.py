@@ -33,6 +33,27 @@ def test_receipt_validation(monkeypatch):
     assert guard.load_delivery_receipt('owner/repo', 'secret', 5) == receipt()
 
 
+def test_history_reads_all_attempts_including_legacy_receipt(monkeypatch):
+    first = receipt()
+    first.pop('run_attempt')
+    second = receipt()
+    second['run_attempt'] = '2'
+    second['papers'][0]['url'] = 'another paper'
+    items = [dict(name=f'daily-delivery-receipt-{i}', expired=False, created_at='2026-11-03', id=i) for i in (1, 2)]
+    monkeypatch.setattr(guard, 'api_pages', lambda *args: iter(items))
+    class Opener:
+        def open(self, request, timeout):
+            payload = first if '/artifacts/1/' in request.full_url else second
+            return io.BytesIO(archive(payload))
+    monkeypatch.setattr(guard, 'build_opener', lambda *args: Opener())
+    results = guard.load_delivery_receipt('owner/repo', 'secret', 5, all_attempts=True)
+    assert [r['run_attempt'] for r in results] == ['1', '2']
+    assert [r['papers'][0]['url'] for r in results] == ['x', 'another paper']
+    second['run_attempt'] = '1'
+    with pytest.raises(ValueError, match='artifact attempt'):
+        guard.load_delivery_receipt('owner/repo', 'secret', 5, all_attempts=True)
+
+
 @pytest.mark.parametrize('change', [{'run_id': '6'}, {'recorded_at_utc': '2026-11-02T17:00:00'}, {'quality_passed': False}])
 def test_invalid_receipt(monkeypatch, change):
     value = receipt()

@@ -10,6 +10,7 @@ search:
 
 recommendations:
   enabled: true # Verify each candidate against actual Zotero evidence before recommendation.
+  exclude_sent: true # Share 180-day confirmed delivery history across daily and supplement emails.
   publication_days: 90 # Newest first; backfill from the last 90 days when recent eligible cards are insufficient.
   candidate_limit: 800 # Wider coverage for ten complete, diverse recommendations.
   verify_limit: 120 # Verify eligibility before spending time on full reading cards.

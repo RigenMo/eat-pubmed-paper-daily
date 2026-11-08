@@ -1,0 +1,33 @@
+name: Maintain sent paper history
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sent-paper-history.yml
+      - scripts/sent_paper_history.py
+      - src/zotero_arxiv_daily/paper_identity.py
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: daily-email-delivery
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Reconcile confirmed receipts
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+          SENT_PAPER_HISTORY_FILE: .cache/sent-paper-history.json
+        run: |
+          python3 scripts/sent_paper_history.py prepare
+          python3 -c "import json; h=json.load(open('.cache/sent-paper-history.json')); print('Retained keys:', len(h['entries']), 'retention days:', h['retention_days'])"

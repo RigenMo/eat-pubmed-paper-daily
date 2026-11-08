@@ -34,41 +34,52 @@ class SafeRedirect(HTTPRedirectHandler):
         return redirected
 
 
-def load_delivery_receipt(repository, token, run_id):
+def load_delivery_receipt(repository, token, run_id, all_attempts=False):
     base = f'https://api.github.com/repos/{repository}/actions'
     artifacts = api_pages(f'{base}/runs/{run_id}/artifacts', token, 'artifacts')
     candidates = [a for a in artifacts if a['name'].startswith('daily-delivery-receipt-') and not a['expired']]
     if not candidates:
-        return None
-    artifact = max(candidates, key=lambda a: (a['created_at'], a['id']))
-    request = Request(f"{base}/artifacts/{artifact['id']}/zip", headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
-    with build_opener(SafeRedirect()).open(request, timeout=20) as response:
-        data = response.read(5 * 1024 * 1024 + 1)
-    if len(data) > 5 * 1024 * 1024:
-        raise ValueError('Receipt archive too large')
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        entries = [e for e in archive.infolist() if e.filename == 'delivery-receipt.json']
-        if len(entries) != 1 or entries[0].file_size > 100 * 1024:
-            raise ValueError('Invalid receipt archive')
-        receipt = json.loads(archive.read(entries[0]))
-    if receipt.get('schema_version') != 1 or receipt.get('run_id') != str(run_id) or receipt.get('mail_sent') is not True:
-        raise ValueError('Invalid receipt identity or status')
-    if receipt.get('run_attempt') is not None and not isinstance(receipt['run_attempt'], str):
-        raise ValueError('Invalid receipt attempt')
-    recorded = datetime.fromisoformat(receipt['recorded_at_utc'].replace('Z', '+00:00'))
-    if recorded.tzinfo is None or recorded.utcoffset() != timedelta(0) or recorded.astimezone(SHANGHAI).date().isoformat() != receipt['date']:
-        raise ValueError('Invalid receipt date')
-    for field in ('paper_count', 'complete_cards', 'expected_cards'):
-        if type(receipt.get(field)) is not int or receipt[field] < 0:
-            raise ValueError('Invalid receipt count')
-    count, complete, expected = (receipt[k] for k in ('paper_count', 'complete_cards', 'expected_cards'))
-    if not expected or complete > count or type(receipt.get('quality_passed')) is not bool or receipt['quality_passed'] != (count >= expected and complete == count):
-        raise ValueError('Invalid receipt quality')
-    if not isinstance(receipt.get('papers'), list) or len(receipt['papers']) != count:
-        raise ValueError('Invalid receipt papers')
-    if any(not isinstance(p, dict) or not all(k in p for k in ('url', 'journal', 'publication_date', 'jif')) for p in receipt['papers']):
-        raise ValueError('Invalid receipt paper')
-    return receipt
+        return [] if all_attempts else None
+    if not all_attempts:
+        candidates = [max(candidates, key=lambda a: (a['created_at'], a['id']))]
+    receipts = []
+    for artifact in candidates:
+        request = Request(f"{base}/artifacts/{artifact['id']}/zip", headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
+        with build_opener(SafeRedirect()).open(request, timeout=20) as response:
+            data = response.read(5 * 1024 * 1024 + 1)
+        if len(data) > 5 * 1024 * 1024:
+            raise ValueError('Receipt archive too large')
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = [e for e in archive.infolist() if e.filename == 'delivery-receipt.json']
+            if len(entries) != 1 or entries[0].file_size > 100 * 1024:
+                raise ValueError('Invalid receipt archive')
+            receipt = json.loads(archive.read(entries[0]))
+        if receipt.get('schema_version') != 1 or receipt.get('run_id') != str(run_id) or receipt.get('mail_sent') is not True:
+            raise ValueError('Invalid receipt identity or status')
+        if receipt.get('run_attempt') is not None and not isinstance(receipt['run_attempt'], str):
+            raise ValueError('Invalid receipt attempt')
+        recorded = datetime.fromisoformat(receipt['recorded_at_utc'].replace('Z', '+00:00'))
+        if recorded.tzinfo is None or recorded.utcoffset() != timedelta(0) or recorded.astimezone(SHANGHAI).date().isoformat() != receipt['date']:
+            raise ValueError('Invalid receipt date')
+        for field in ('paper_count', 'complete_cards', 'expected_cards'):
+            if type(receipt.get(field)) is not int or receipt[field] < 0:
+                raise ValueError('Invalid receipt count')
+        count, complete, expected = (receipt[k] for k in ('paper_count', 'complete_cards', 'expected_cards'))
+        if not expected or complete > count or type(receipt.get('quality_passed')) is not bool or receipt['quality_passed'] != (count >= expected and complete == count):
+            raise ValueError('Invalid receipt quality')
+        if not isinstance(receipt.get('papers'), list) or len(receipt['papers']) != count:
+            raise ValueError('Invalid receipt papers')
+        if any(not isinstance(p, dict) or not all(k in p for k in ('url', 'journal', 'publication_date', 'jif')) for p in receipt['papers']):
+            raise ValueError('Invalid receipt paper')
+        if all_attempts:
+            # Older valid receipts predate the run_attempt field. Their upload
+            # name still records the attempt; an explicit conflicting field is invalid.
+            attempt = artifact['name'].removeprefix('daily-delivery-receipt-')
+            if not attempt.isdigit() or int(attempt) < 1 or receipt.get('run_attempt') not in (None, attempt):
+                raise ValueError('Invalid receipt artifact attempt')
+            receipt['run_attempt'] = attempt
+        receipts.append(receipt)
+    return receipts if all_attempts else receipts[0]
 
 
 def delivery_status(repository, token, current_run, now=None, notice_kind="failure", progress=None):

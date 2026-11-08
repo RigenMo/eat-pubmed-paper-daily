@@ -52,6 +52,7 @@ def _base_config():
                 "journals.mode=whitelist",
                 "journals.easyscholar.api_key=",
                 "recommendations.enabled=false",
+                "++recommendations.exclude_sent=false",
                 "recommendations.require_cards=false",
             ],
         )
@@ -65,3 +66,4 @@ def config(_base_config):
     Safe to mutate inside any test without polluting other tests.
     """
     return copy.deepcopy(_base_config)
+
