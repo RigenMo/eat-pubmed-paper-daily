@@ -17,7 +17,15 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup uv
+        id: uv
+        continue-on-error: true
         uses: astral-sh/setup-uv@v7.1.4
+
+      - name: Install uv if release download failed
+        if: steps.uv.outcome == 'failure'
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/uv-bootstrap" uv
+          echo "$RUNNER_TEMP/uv-bootstrap/bin" >> "$GITHUB_PATH"
 
       - name: Run Pytest
         run: |
