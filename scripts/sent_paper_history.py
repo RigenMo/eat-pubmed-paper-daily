@@ -18,7 +18,9 @@ REMOTE = '.github/sent-paper-history.json'
 
 
 def request(method, path, payload=None):
-    url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/{path}"
+    url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+    if path:
+        url += '/' + path
     headers = {'Authorization': f"Bearer {os.environ['GITHUB_TOKEN']}", 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
     data = json.dumps(payload).encode() if payload is not None else None
     with urlopen(Request(url, data=data, headers=headers, method=method), timeout=20) as response:
