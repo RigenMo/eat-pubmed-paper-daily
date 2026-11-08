@@ -24,6 +24,21 @@ def test_stdlib_import():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize('path', ['', 'git/ref/heads/main'])
+def test_repository_api_uses_canonical_url(monkeypatch, path):
+    from io import BytesIO
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'a/b')
+    monkeypatch.setenv('GITHUB_TOKEN', 'test')
+    urls = []
+    def open_request(request, timeout):
+        urls.append(request.full_url)
+        return BytesIO(b'{}')
+    monkeypatch.setattr(history, 'urlopen', open_request)
+    history.request('GET', path)
+    expected = 'https://api.github.com/repos/a/b' + ('/' + path if path else '')
+    assert urls == [expected]
+
+
 def test_missing_branch_bootstrap(monkeypatch):
     calls = []
     def request(method, path, payload=None):
