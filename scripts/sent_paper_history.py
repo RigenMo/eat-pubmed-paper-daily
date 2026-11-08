@@ -101,6 +101,8 @@ def verify_missing_receipts(repo, token, run_id, workflow, receipts):
     job_name = 'supplement' if workflow == 'supplement.yml' else 'calculate-and-send'
     step_name = 'Send missing cards' if workflow == 'supplement.yml' else 'Run script'
     for job in jobs:
+        if str(run_id) == os.environ.get('GITHUB_RUN_ID') and str(job.get('run_attempt')) == os.environ.get('GITHUB_RUN_ATTEMPT', '1'):
+            continue
         if job.get('name') != job_name or str(job.get('run_attempt')) in attempts:
             continue
         steps = job.get('steps') or []
@@ -134,6 +136,9 @@ def prepare(path):
     missing = 0
     confirmed = 0
     scanned = 0
+    rerun = None
+    if int(os.environ.get('GITHUB_RUN_ATTEMPT', '1')) > 1:
+        rerun = request('GET', f"actions/runs/{os.environ['GITHUB_RUN_ID']}")
     for workflow in ('main.yml', 'supplement.yml', 'test.yml'):
         url = f'https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs?{query}'
         try:
@@ -142,9 +147,9 @@ def prepare(path):
             if error.code == 404:
                 continue
             raise
+        if rerun and rerun.get('path') == '.github/workflows/' + workflow and all(r['id'] != rerun['id'] for r in runs):
+            runs.append(rerun)
         for run in runs:
-            if str(run['id']) == os.environ.get('GITHUB_RUN_ID'):
-                continue
             scanned += 1
             receipts = load_delivery_receipt(repo, token, str(run['id']), all_attempts=True)
             if not receipts:
@@ -157,7 +162,7 @@ def prepare(path):
             boundary = now - timedelta(days=2)
             if current:
                 boundary = min(boundary, datetime.fromisoformat(current['reconciled_at'].replace('Z', '+00:00')))
-            if created >= boundary:
+            if created >= boundary or str(run['id']) == os.environ.get('GITHUB_RUN_ID'):
                 verify_missing_receipts(repo, token, str(run['id']), workflow, receipts)
     print(f'Coverage start: {start.isoformat()}; scanned runs: {scanned}; confirmed receipts: {confirmed}; unavailable receipts: {missing}')
     result = persist(additions, now.isoformat())

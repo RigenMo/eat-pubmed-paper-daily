@@ -107,7 +107,7 @@ def test_prepare_only_confirmed_receipts_and_latest(tmp_path, monkeypatch, capsy
     def receipt(repo, token, run, all_attempts=False):
         if run == '4':
             return []
-        return [{'date': '2026-11-08' if run == '1' else '2026-11-07', 'papers': [{'url': 'https://pubmed.ncbi.nlm.nih.gov/123/'}]}]
+        return [{'run_attempt': '1', 'date': '2026-11-08' if run == '1' else '2026-11-07', 'papers': [{'url': 'https://pubmed.ncbi.nlm.nih.gov/123/'}]}]
     monkeypatch.setattr(history, 'load_delivery_receipt', receipt)
     saved = []
     def persist(entries, stamp):
@@ -174,3 +174,35 @@ def test_prepare_collects_multiple_attempts(tmp_path, monkeypatch):
     monkeypatch.setattr(history, 'persist', lambda entries, stamp: saved.append(entries) or empty_history())
     history.prepare(tmp_path / 'history.json')
     assert len(saved[0]) == 2
+
+
+def test_rerun_recovers_previous_attempt_outside_created_window(tmp_path, monkeypatch):
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'a/b')
+    monkeypatch.setenv('GITHUB_TOKEN', 'test')
+    monkeypatch.setenv('GITHUB_RUN_ID', '42')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    monkeypatch.setattr(history, 'read_remote', lambda: (empty_history(), 'sha'))
+    monkeypatch.setattr(history, 'api_pages', lambda *args: [])
+    monkeypatch.setattr(history, 'request', lambda *args: {'id': 42, 'path': '.github/workflows/test.yml', 'created_at': '2020-01-01T00:00:00Z'})
+    old_receipt = {'run_attempt': '1', 'date': '2026-11-07', 'papers': [{'url': 'https://pubmed.ncbi.nlm.nih.gov/123/'}]}
+    monkeypatch.setattr(history, 'load_delivery_receipt', lambda *args, **kwargs: [old_receipt])
+    saved = []
+    monkeypatch.setattr(history, 'persist', lambda entries, stamp: saved.append(entries) or empty_history())
+    history.prepare(tmp_path / 'history.json')
+    assert len(saved[0]) == 1
+
+
+def test_current_attempt_does_not_hide_unknown_previous_send(monkeypatch):
+    from io import BytesIO
+    from types import SimpleNamespace
+    monkeypatch.setenv('GITHUB_RUN_ID', '42')
+    monkeypatch.setenv('GITHUB_RUN_ATTEMPT', '2')
+    current = {'name': 'calculate-and-send', 'run_attempt': 2, 'id': 2, 'steps': [{'name': 'Run script', 'conclusion': None}]}
+    prior = {'name': 'calculate-and-send', 'run_attempt': 1, 'id': 1, 'steps': [{'name': 'Run script', 'conclusion': 'success'}]}
+    jobs = [current]
+    monkeypatch.setattr(history, 'api_pages', lambda *args: jobs)
+    monkeypatch.setattr(history, 'build_opener', lambda *args: SimpleNamespace(open=lambda *args, **kwargs: BytesIO(b'')))
+    history.verify_missing_receipts('a/b', 'token', '42', 'test.yml', [])
+    jobs.append(prior)
+    with pytest.raises(RuntimeError, match='Possible SMTP'):
+        history.verify_missing_receipts('a/b', 'token', '42', 'test.yml', [])
