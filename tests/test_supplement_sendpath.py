@@ -42,6 +42,9 @@ class FakePaper:
 
 def setup_send(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    history = tmp_path / 'sent-paper-history.json'
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(history))
+    module.record_sent(history, [], '2026-11-01')
     for key, value in {'GITHUB_TOKEN': 'test', 'GITHUB_REPOSITORY': 'owner/repo',
                        'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
                        'GITHUB_OUTPUT': str(tmp_path / 'github-output')}.items():
