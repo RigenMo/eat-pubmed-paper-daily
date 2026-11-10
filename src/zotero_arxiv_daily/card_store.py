@@ -27,7 +27,7 @@ def policy_fingerprint(config, corpus):
     # Only the digest is persisted; library contents never leave memory here.
     journals = config.get('journals', {})
     journal_policy = {key: journals.get(key) for key in ('enabled', 'mode', 'min_jif')}
-    data = json.dumps({'version': 1, 'reader': 'abstract-600-800-v1', 'effective_focus': effective_focus_mode(config.recommendations), 'recommendations': settings, 'journals': journal_policy, 'corpus': references}, ensure_ascii=False, sort_keys=True, default=str)
+    data = json.dumps({'version': 1, 'reader': 'abstract-reader-v1', 'effective_focus': effective_focus_mode(config.recommendations), 'recommendations': settings, 'journals': journal_policy, 'corpus': references}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
@@ -51,7 +51,9 @@ def _valid(paper, today, config):
     Paper._validate_reader_translation({'abstract_zh': paper.abstract_zh})
     labels = {f'摘要段落{i}' for i in range(1, len(Paper._split_material(paper.abstract, structured_headings=True)) + 1)}
     card = Paper._validate_reader_card(paper.reading_card, SCOPE, labels)
-    return 600 <= len(Paper._format_reading_card(card)) <= 800 and bool(paper_keys(paper))
+    # Reuse the deployed reader's actual validator. "About 600 characters"
+    # is a writing target; adding a new minimum would discard approved work.
+    return len(Paper._format_reading_card(card)) <= 800 and bool(paper_keys(paper))
 
 
 def save_ready(paper, config, corpus):
