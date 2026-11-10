@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from loguru import logger
 from .base import BaseRetriever, register_retriever
-from .public_index import search_public_index
+from .public_index import search_public_index, fetch_public_records
 from ..protocol import Paper
 from ..reading_preferences import effective_focus_mode
 
@@ -637,13 +637,24 @@ class PubMedRetriever(BaseRetriever):
                 "retmode": "xml",
             }
             sleep(_RATE_SLEEP)
-            resp = _ncbi_get(_EFETCH_URL, params)
+            try:
+                resp = _ncbi_get(_EFETCH_URL, params)
+            except Exception:
+                if not getattr(self, "_public_details_enabled", False):
+                    raise
+                all_records.extend(self._public_details(batch))
+                continue
             response_text = resp.text or ""
             # XML is the authoritative path for publication dates and
             # PubMedPubDate history.  Keep MEDLINE parsing for old fixtures
             # and any legacy endpoint response that is not XML.
             if response_text.lstrip("\ufeff \t\r\n").startswith("<"):
-                records = _parse_pubmed_xml(response_text)
+                try:
+                    records = _parse_pubmed_xml(response_text)
+                except ValueError:
+                    if not getattr(self, "_public_details_enabled", False):
+                        raise
+                    records = []
             else:
                 records = _parse_medline(response_text)
                 for record in records:
@@ -659,12 +670,26 @@ class PubMedRetriever(BaseRetriever):
                                 number = _normalise_pubmed_month(month) if month else None
                                 if not month or number:
                                     record["publication_date"] = year + (f"-{number}" if number else "") + (f"-{int(day):02d}" if day else "")
-            if not records:
+            if not records and not getattr(self, "_public_details_enabled", False):
                 raise ValueError(
                     "PubMed EFetch returned no parseable records for the requested PMID batch"
                 )
+            if getattr(self, "_public_details_enabled", False):
+                complete = {str(record.get("PMID")) for record in records if record.get("TI") and record.get("AB") and (record.get("JT") or record.get("TA")) and record.get("publication_date")}
+                missing = [pmid for pmid in batch if pmid not in complete]
+                replacements = self._public_details(missing)
+                replaced = {record["PMID"] for record in replacements}
+                records = [record for record in records if str(record.get("PMID")) not in replaced] + replacements
             all_records.extend(records)
         return all_records
+
+    def _public_details(self, pmids):
+        remaining = getattr(self, "_public_detail_budget", 0)
+        if not pmids or remaining <= 0:
+            return []
+        limited = pmids[:remaining * 100]
+        self._public_detail_budget -= (len(limited) + 99) // 100
+        return fetch_public_records(limited, max_requests=remaining)
 
     def is_allowed_journal(self, journal: Any) -> bool:
         """Return whether a final paper journal passes the exact allowlist gate."""
@@ -679,6 +704,12 @@ class PubMedRetriever(BaseRetriever):
     def _retrieve_raw_papers(self) -> list[dict[str, Any]]:
         """Progressive fallback across query levels, escalating only when results < _MIN_RESULTS."""
         self.retrieval_audit = {}
+        self._public_details_enabled = (
+            int(self.config.search.mode) == 5
+            and bool(self.config.get("recommendations", {}).get("enabled", False))
+            and bool(self.retriever_config.get("public_index_fallback", False))
+        )
+        self._public_detail_budget = 4
         today = datetime.now(_SHANGHAI).date()
         date_filter = self._date_filter(today)
         min_n = self._MIN_RESULTS
@@ -701,7 +732,11 @@ class PubMedRetriever(BaseRetriever):
         def _recent_results(ids: list[str]) -> list[dict[str, Any]]:
             records = self._finalise(ids)
             start = today - timedelta(days=self._publication_days)
-            return [record for record in records if _publication_in_window(record.get("publication_date"), start, today)]
+            return [record for record in records if _publication_in_window(
+                record.get("publication_date"),
+                max(start, today - timedelta(days=90)) if record.get("metadata_source") == "europe_pmc_core" else start,
+                today,
+            )]
 
         pmids: list[str] = []
 
@@ -839,11 +874,19 @@ class PubMedRetriever(BaseRetriever):
             logger.info(f"PubMed bounded theme retrieval: {len(rounds)} round(s), {used}/{budget} requested IDs")
             if fallback_enabled and self.retrieval_audit["failed_queries"] and len(selected) < self._max_results:
                 focus = effective_focus_mode(self.config.get("recommendations", {}), today)
-                ids, public_audit = search_public_index(today, self._publication_days, self._max_results, focus)
+                try:
+                    ids, public_audit = search_public_index(today, min(self._publication_days, 90), self._max_results, focus)
+                except Exception:
+                    if selected:
+                        self.retrieval_audit["public_index_error"] = True
+                        return selected[:self._max_results]
+                    raise
                 self.retrieval_audit["public_index"] = public_audit
                 existing = {str(record["PMID"]) for record in selected}
                 new_ids = [pmid for pmid in ids if pmid not in queried_ids and pmid not in existing]
-                selected.extend(_recent_results(new_ids))
+                public_records = self._filter_journals(self._public_details(new_ids))
+                start = today - timedelta(days=min(self._publication_days, 90))
+                selected.extend(record for record in public_records if _publication_in_window(record.get("publication_date"), start, today))
                 self.retrieval_audit["after_date_filter_count"] = len(selected)
             return selected[:self._max_results]
 
@@ -904,6 +947,9 @@ class PubMedRetriever(BaseRetriever):
     def _finalise(self, pmids: list[str]) -> list[dict[str, Any]]:
         logger.info(f"PubMed: fetching details for {len(pmids)} PMIDs...")
         records = self._fetch_details(pmids)
+        return self._filter_journals(records)
+
+    def _filter_journals(self, records):
         if not self._journal_filter_enabled:
             return records
 
@@ -990,6 +1036,13 @@ class PubMedRetriever(BaseRetriever):
                 journal_metrics = dict(entry)
                 break
 
+        metadata_source = raw_paper.get("metadata_source")
+        if metadata_source == "europe_pmc_core":
+            metadata = {"provider": "Europe PMC", "metadata_source": metadata_source,
+                        "url": f"https://europepmc.org/article/MED/{pmid}"}
+        else:
+            metadata = {"provider": "PubMed", "metadata_source": "pubmed_efetch", "url": url}
+
         return Paper(
             source=self.name,
             title=title,
@@ -1003,4 +1056,5 @@ class PubMedRetriever(BaseRetriever):
             affiliations=affiliations,
             publication_date=raw_paper.get("publication_date"),
             publication_history=raw_paper.get("publication_history", []),
+            source_metadata=[metadata],
         )

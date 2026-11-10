@@ -113,3 +113,29 @@ def test_history_credential_failure_never_sends(monkeypatch, tmp_path):
         module.supplement(config)
     assert not sent
     assert not (tmp_path / 'outputs/delivery-receipt.json').exists()
+
+
+def test_partial_cache_is_sent_when_new_candidate_processing_fails(monkeypatch, tmp_path):
+    config, _, papers, sent = setup_send(monkeypatch, tmp_path)
+    config.recommendations.card_cache_enabled = True
+    config.zotero = {'include_path': None, 'ignore_path': None}
+    cached = papers['11']
+    cached.reading_card, cached.abstract_zh, cached.reader_status = {'complete': True}, '摘要', 'success'
+
+    class FailingExecutor:
+        def __init__(self, config):
+            raise RuntimeError('new candidate service failed')
+
+        def fetch_zotero_corpus(self):
+            return ['reference']
+
+        def filter_corpus(self, corpus):
+            return corpus
+
+    monkeypatch.setattr(module, 'Executor', FailingExecutor)
+    monkeypatch.setattr(module, 'load_ready', lambda *args: [cached])
+    retriever = SimpleNamespace(_fetch_details=lambda ids: [papers[i] for i in ids],
+                                convert_to_paper=lambda record: record)
+    monkeypatch.setattr(module, 'PubMedRetriever', lambda config: retriever)
+    assert module.supplement(config) == 1
+    assert sent[0][0] == [cached]

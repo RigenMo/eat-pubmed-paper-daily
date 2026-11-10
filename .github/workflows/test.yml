@@ -32,6 +32,14 @@ jobs:
           SENT_PAPER_HISTORY_FILE: .cache/sent-paper-history.json
         run: python3 scripts/sent_paper_history.py prepare
 
+      - name: Restore completed card inventory
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+        run: node scripts/card_inventory.mjs restore
+
       - name: Run script
         env:
           PYTHONPATH: src:.
@@ -49,7 +57,7 @@ jobs:
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           test -n "$OPENAI_API_KEY" || { echo "Set the GOAICHAT_API_KEY repository secret first."; exit 1; }
-          uv run src/zotero_arxiv_daily/main.py executor.debug=false executor.max_paper_num=10 search.mode=5 source.mix_mode=1 llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
+          uv run src/zotero_arxiv_daily/main.py executor.debug=false executor.max_paper_num=10 search.mode=5 source.mix_mode=1 llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.candidate_limit=800 recommendations.verify_limit=120 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}' source.pubmed.max_results=800 llm.api.timeout=600 llm.api.max_retries=1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000
 
       - name: Save sent paper history
         if: always()
@@ -67,3 +75,21 @@ jobs:
           path: outputs/delivery-receipt.json
           if-no-files-found: ignore
           retention-days: 90
+
+      - name: Preserve completed cards
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+        run: node scripts/card_inventory.mjs pack
+
+      - name: Upload encrypted card inventory
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reading-card-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/card-inventory.enc
+          if-no-files-found: ignore
+          retention-days: 7

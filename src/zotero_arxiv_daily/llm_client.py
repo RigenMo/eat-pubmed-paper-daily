@@ -19,6 +19,7 @@ class FailoverClient:
         self.clock = clock
         self.failed_until = {}
         self.preferred = None
+        self.deadline = None  # Optional whole-generation monotonic deadline.
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     async def _async_create(self, attempt):
@@ -55,6 +56,8 @@ class FailoverClient:
         cooling.sort(key=lambda m: self.failed_until[m])
         available = healthy + cooling
         budget = self.total_timeout
+        if self.deadline is not None:
+            budget = min(budget, max(0, self.deadline - now))
         if kwargs.get("timeout") is not None:
             budget = min(budget, float(kwargs["timeout"]))
         deadline = now + budget
