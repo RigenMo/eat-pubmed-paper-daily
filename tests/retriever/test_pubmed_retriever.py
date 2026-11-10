@@ -694,7 +694,7 @@ def test_public_fallback_expiry_restores_date_only_mode(config, monkeypatch):
     today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
     calls = []
     monkeypatch.setattr(PubMedRetriever, '_fetch_pmids_with_limit', lambda *args: (_ for _ in ()).throw(_http_error(500)))
-    monkeypatch.setattr(PubMedRetriever, '_finalise', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
+    monkeypatch.setattr(PubMedRetriever, '_public_details', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
     monkeypatch.setattr(module, 'search_public_index', lambda *args: calls.append(args) or (['9'], []))
     retriever = PubMedRetriever(config)
     retriever.set_pubmed_queries(['PRIVATE_LIBRARY_TERM'])
@@ -713,7 +713,7 @@ def test_repeated_invalid_provider_responses_fail_over_before_all_queries(config
         raise module.PubMedSearchResponseError()
     today = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
     monkeypatch.setattr(PubMedRetriever, '_fetch_pmids_with_limit', invalid)
-    monkeypatch.setattr(PubMedRetriever, '_finalise', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
+    monkeypatch.setattr(PubMedRetriever, '_public_details', lambda self, ids: [{'PMID':pmid,'publication_date':today} for pmid in ids])
     monkeypatch.setattr(module, 'search_public_index', lambda *args: (['9'], []))
     retriever = PubMedRetriever(config)
     retriever.set_pubmed_queries(['one','two','three','four'])
@@ -796,7 +796,7 @@ def test_public_index_recovers_failed_themes_without_private_queries(config, mon
         return ["7", "8"], [{"query_index": 1, "requested": 6, "returned": 2}]
     monkeypatch.setattr(module, "search_public_index", fallback)
     today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    monkeypatch.setattr(PubMedRetriever, "_finalise", lambda self, ids: [{"PMID": i, "publication_date": today if i == "7" else "2000-01-01"} for i in ids])
+    monkeypatch.setattr(PubMedRetriever, "_public_details", lambda self, ids: [{"PMID": i, "publication_date": today if i == "7" else "2000-01-01"} for i in ids])
     retriever = PubMedRetriever(config)
     retriever.set_max_results(6)
     retriever.set_pubmed_queries(["PRIVATE title"])
@@ -852,3 +852,57 @@ def test_public_index_failure_is_not_zero(config, monkeypatch):
     retriever.set_pubmed_queries(["theme"])
     with pytest.raises(RuntimeError, match="public index unavailable"):
         retriever._retrieve_raw_papers()
+
+
+def test_failed_efetch_uses_core_and_converts_to_paper(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    config.search.mode = 5
+    config.recommendations.enabled = True
+    config.source.pubmed.public_index_fallback = True
+    today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    monkeypatch.setattr(PubMedRetriever, "_fetch_pmids_with_limit", lambda *a: ["42"])
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    monkeypatch.setattr(module, "_ncbi_get", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
+    calls = []
+    def core(ids, max_requests):
+        calls.append(ids)
+        return [{"PMID": "42", "TI": "Study", "AB": "Abstract", "JT": "Journal", "AU": ["Smith J"],
+                 "LID": "10.1234/example [doi]", "publication_date": today, "metadata_source": "europe_pmc_core"}]
+    monkeypatch.setattr(module, "fetch_public_records", core)
+    retriever = PubMedRetriever(config)
+    retriever.set_pubmed_queries(["PRIVATE TITLE"])
+    raw = retriever._retrieve_raw_papers()
+    paper = retriever.convert_to_paper(raw[0])
+    assert calls == [["42"]] and paper.title == "Study" and paper.abstract == "Abstract"
+    assert paper.journal == "Journal" and paper.pdf_url == "https://doi.org/10.1234/example"
+    assert paper.publication_date == today
+    assert paper.source == "pubmed"
+    assert paper.source_metadata == [{"provider": "Europe PMC", "metadata_source": "europe_pmc_core", "url": "https://europepmc.org/article/MED/42"}]
+
+
+def test_partial_efetch_keeps_primary_and_fetches_missing_only(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    retriever = PubMedRetriever(config)
+    retriever._public_details_enabled = True
+    retriever._public_detail_budget = 4
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    monkeypatch.setattr(module, "_ncbi_get", lambda *a: SimpleNamespace(text="PMID- 1\nTI  - Existing\nAB  - Abstract\nJT  - Journal\nDEP - 20261101\n"))
+    calls = []
+    monkeypatch.setattr(module, "fetch_public_records", lambda ids, max_requests: calls.append(ids) or [{"PMID": "2", "TI": "Recovered"}])
+    result = retriever._fetch_details(["1", "2"])
+    assert [r["PMID"] for r in result] == ["1", "2"] and calls == [["2"]]
+
+
+def test_complete_efetch_does_not_call_public_details(config, monkeypatch):
+    import zotero_arxiv_daily.retriever.pubmed_retriever as module
+    retriever = PubMedRetriever(config)
+    retriever._public_details_enabled = True
+    retriever._public_detail_budget = 4
+    monkeypatch.setattr(module, "sleep", lambda _: None)
+    monkeypatch.setattr(module, "_ncbi_get", lambda *a: SimpleNamespace(text="PMID- 1\nTI  - Existing\nAB  - Abstract\nJT  - Journal\nDEP - 20261101\n"))
+    monkeypatch.setattr(module, "fetch_public_records", lambda *a, **k: pytest.fail("unexpected Europe PMC request"))
+    raw = retriever._fetch_details(["1"])[0]
+    assert raw["TI"] == "Existing"
+    paper = retriever.convert_to_paper(raw)
+    assert paper.source == "pubmed"
+    assert paper.source_metadata == [{"provider": "PubMed", "metadata_source": "pubmed_efetch", "url": "https://pubmed.ncbi.nlm.nih.gov/1/"}]

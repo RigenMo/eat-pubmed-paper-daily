@@ -196,3 +196,19 @@ def test_preferred_healthy_model_keeps_full_timeout_when_others_recover():
     assert client.create(model=MODELS[0], timeout=120) == "ok"
     assert calls[0]["model"] == MODELS[3]
     assert calls[0]["timeout"] == 90
+
+
+def test_whole_generation_deadline_caps_request_and_blocks_new_call():
+    calls = []
+    now = [100.0]
+    def create(**kwargs):
+        calls.append(kwargs)
+        return 'ok'
+    client = client_with(create, lambda: now[0])
+    client.deadline = 108.0
+    assert client.create(model=MODELS[0], timeout=120) == 'ok'
+    assert calls[0]['timeout'] <= 8
+    now[0] = 109.0
+    with pytest.raises(TimeoutError):
+        client.create(model=MODELS[0])
+    assert len(calls) == 1

@@ -1,0 +1,88 @@
+name: Discovery quality experiment (no email)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/cognitive-discovery-upgrade]
+    paths:
+      - .github/workflows/discovery-shadow.yml
+      - scripts/discovery_preflight.py
+      - src/zotero_arxiv_daily/discovery.py
+  schedule:
+    - cron: '20 6 * * *' # 14:20 Shanghai; independent of morning SMTP.
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: discovery-quality-shadow
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - name: Leave active senders alone
+        id: senders
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.setOutput('busy', 'true');
+            try {
+              const states = await Promise.all(['in_progress', 'queued'].map(status =>
+                github.paginate(github.rest.actions.listWorkflowRunsForRepo, {...context.repo, status, per_page: 100})));
+              const busy = states.flat().some(r => ['.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml'].includes(r.path));
+              core.setOutput('busy', String(busy));
+            } catch (error) { core.info('Sender activity unavailable; skip optional discovery.'); }
+      - uses: astral-sh/setup-uv@v7
+        if: steps.senders.outputs.busy == 'false'
+      - name: Compare a fixed pool without SMTP credentials
+        if: steps.senders.outputs.busy == 'false'
+        env:
+          PYTHONPATH: src:.
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run python scripts/discovery_preflight.py --output outputs/discovery --limit 12 --compare-zotero --model kimi-k3 --base-url https://llm.goaichat.top/v1
+      - name: Encrypt detailed review
+        if: always()
+        continue-on-error: true
+        env:
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+          CARD_STORE_DIR: .cache/discovery-review
+          CARD_INVENTORY_FILE: .cache/discovery-review.enc
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          target = Path('.cache/discovery-review')
+          target.mkdir(parents=True, exist_ok=True)
+          for name in ('detail.json', 'review.html'):
+              source = Path('outputs/discovery') / name
+              if source.exists():
+                  entry = {'kind': name, 'content': source.read_text(encoding='utf-8')}
+                  (target / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(entry, ensure_ascii=False), encoding='utf-8')
+          PY
+          node scripts/card_inventory.mjs pack
+      - name: Upload aggregate comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-quality-summary
+          path: outputs/discovery/summary.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload encrypted review
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery-review-encrypted
+          path: .cache/discovery-review.enc
+          if-no-files-found: ignore
+          retention-days: 7

@@ -99,6 +99,9 @@ class Paper:
     publication_history: Optional[list[dict[str, str]]] = None
     recommendation_matches: Optional[list[dict[str, Any]]] = None
     innovation_assessment: Optional[dict[str, Any]] = None
+    discovery_channels: Optional[list[str]] = None
+    source_metadata: Optional[list[dict[str, Any]]] = None
+    thought_card: Optional[dict[str, Any]] = None
 
     def _translate_title_with_llm(self, openai_client: OpenAI, llm_params: dict) -> str:
         title_kwargs = dict(llm_params.get("generation_kwargs", {}))

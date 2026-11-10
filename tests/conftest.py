@@ -53,6 +53,7 @@ def _base_config():
                 "journals.easyscholar.api_key=",
                 "recommendations.enabled=false",
                 "++recommendations.exclude_sent=false",
+                "recommendations.card_cache_enabled=false",
                 "recommendations.require_cards=false",
             ],
         )

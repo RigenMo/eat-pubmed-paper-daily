@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,14 +14,17 @@ import hydra
 from omegaconf import DictConfig
 
 from daily_delivery_guard import SHANGHAI, SafeRedirect, api_pages, load_delivery_receipt
-from zotero_arxiv_daily.executor import Executor
+from zotero_arxiv_daily.executor import Executor, normalize_path_patterns
+from zotero_arxiv_daily.card_store import load_ready, save_ready
+from zotero_arxiv_daily.llm_client import FailoverClient
+from zotero_arxiv_daily.reranker import get_reranker_cls
 from zotero_arxiv_daily.construct_email import render_email
 from zotero_arxiv_daily.innovation import assess_innovation
 from zotero_arxiv_daily.journal_metrics import enrich_journal_metrics
 from zotero_arxiv_daily.paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from zotero_arxiv_daily.reading_preferences import effective_focus_mode, focus_evidence, order_candidates
 from zotero_arxiv_daily.recommendations import verify_recommendations
-from zotero_arxiv_daily.retriever.pubmed_retriever import _publication_in_window
+from zotero_arxiv_daily.retriever.pubmed_retriever import PubMedRetriever, _publication_in_window
 from zotero_arxiv_daily.utils import send_email
 
 READ = re.compile(r'Reading candidate \d+; completed \d+/\d+: (https://pubmed\.ncbi\.nlm\.nih\.gov/\d+/?)')
@@ -116,6 +120,7 @@ def supplement(config, progress=None):
     progress.update(retry_safe=False, cumulative=0, attempts=0)
     token, repository = os.environ['GITHUB_TOKEN'], os.environ['GITHUB_REPOSITORY']
     now = datetime.now(timezone.utc)
+    deadline = time.monotonic() + max(0, float(getattr(config, "recommendations", {}).get("generation_budget_seconds", 1200)))
     receipts, job_ids, attempts = today_history(repository, token, os.environ['GITHUB_RUN_ID'], now)
     delivered = {}
     for receipt in receipts:
@@ -133,73 +138,142 @@ def supplement(config, progress=None):
     if not receipts or not job_ids:
         raise RuntimeError('No confirmed main delivery available for supplementation')
     progress.update(retry_safe=True, cumulative=len(delivered), attempts=attempts)
-    candidates = [item for item in read_candidates(repository, token, job_ids) if item not in delivered]
-    if not candidates:
-        raise RuntimeError('No unsent previously read candidates')
-    executor = Executor(config)
-    retriever = executor.retrievers['pubmed']
-    records = retriever._fetch_details(list(delivered) + candidates)
-    papers = [retriever.convert_to_paper(record) for record in records]
-    papers = [paper for paper in papers if paper is not None]
-    by_id = {pmid(paper.url): paper for paper in papers}
-    if any(identifier not in by_id for identifier in delivered):
-        raise RuntimeError('Cannot establish topic of all delivered papers')
-    settings = config.recommendations
+    settings = getattr(config, "recommendations", {})
     mode = effective_focus_mode(settings)
-    focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
-    journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
     today = now.astimezone(SHANGHAI).date()
-    start = today - timedelta(days=int(settings.get('publication_days', 90)))
-    eligible = [by_id[identifier] for identifier in candidates if identifier in by_id and
-                _publication_in_window(by_id[identifier].publication_date, start, today)]
-    # Today's count is independent of the long-term ledger; only new candidates
-    # are filtered, before journal lookups, verification and reading generation.
     history_path = Path(os.environ.get('SENT_PAPER_HISTORY_FILE', '.cache/sent-paper-history.json'))
+    seen = set()
     if settings.get('exclude_sent', True):
         history = load_history(history_path, required=os.environ.get('GITHUB_ACTIONS', '').lower() == 'true')
-        seen = set(history['entries'])
-    else:
-        seen = set()
+        seen.update(history['entries'])
     for receipt in receipts:
         for paper in receipt['papers']:
             seen.update(paper_keys(paper))
-    eligible = filter_unseen(eligible, seen)
-    if not eligible:
-        raise RuntimeError('No unseen eligible candidates; no email sent')
-    eligible = enrich_journal_metrics(eligible, config.journals)
-    corpus = executor.filter_corpus(executor.fetch_zotero_corpus())
-    if not corpus:
-        raise RuntimeError('No eligible Zotero references')
-    eligible = executor.reranker.rerank(eligible, corpus, keyword_query=None,
-                                        favorite_journals=config.executor.get('favorite_journals', None))
-    focus, library = [], []
-    for paper in eligible:
-        evidence = focus_evidence(paper, mode)
-        if evidence:
-            paper.recommendation_matches = [evidence]
-            focus.append(paper)
-        else:
-            library.append(paper)
-    eligible = focus + verify_recommendations(library, executor.openai_client, config.llm,
-                                               batch_size=int(settings.get('batch_size', 5)))
-    if settings.get('innovation_enabled', True):
-        assess_innovation(eligible, executor.openai_client, config.llm)
-    eligible = order_candidates(eligible, mode)
+    cached = []
+    if settings.get('card_cache_enabled', False):
+        try:
+            lightweight = Executor.__new__(Executor)
+            lightweight.config = config
+            lightweight.include_path_patterns = normalize_path_patterns(config.zotero.include_path, 'include_path')
+            lightweight.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, 'ignore_path')
+            corpus = lightweight.filter_corpus(lightweight.fetch_zotero_corpus())
+            if corpus:
+                cached = filter_unseen(load_ready(config, corpus), seen)
+        except Exception:
+            cached = []
     selected = []
-    for paper in eligible:
-        if len(selected) >= 10 - len(delivered):
-            break
-        journal = ' '.join((paper.journal or '').casefold().split())
-        is_focus = bool(focus_evidence(paper, mode))
-        if journal_counts[journal] >= int(settings.get('max_per_journal', 3)) or (is_focus and focus_count >= 9):
-            continue
-        paper.generate_tldr(executor.openai_client, config.llm)
-        if not paper.reading_card or not paper.abstract_zh or paper.reader_status != 'success':
-            continue
-        paper.generate_title_translation(executor.openai_client, config.llm)
-        selected.append(paper)
-        journal_counts[journal] += 1
-        focus_count += int(is_focus)
+    if cached:
+        # Receipts retain journal but not topic; retrieve delivered metadata to
+        # preserve the same-day focus limit without constructing an Executor.
+        try:
+            retriever = PubMedRetriever(config)
+            delivered_records = retriever._fetch_details(list(delivered))
+            delivered_papers = [retriever.convert_to_paper(record) for record in delivered_records]
+            by_id = {pmid(paper.url): paper for paper in delivered_papers if paper is not None}
+            if any(identifier not in by_id for identifier in delivered):
+                raise ValueError('Delivered topic metadata unavailable')
+            focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
+            journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
+            for paper in order_candidates(cached, mode):
+                journal = ' '.join((paper.journal or '').casefold().split())
+                is_focus = bool(focus_evidence(paper, mode))
+                if journal_counts[journal] >= int(settings.get('max_per_journal', 3)) or (is_focus and focus_count >= 9):
+                    continue
+                selected.append(paper)
+                journal_counts[journal] += 1
+                focus_count += int(is_focus)
+                if len(selected) >= 10 - len(delivered):
+                    break
+        except Exception:
+            selected = []
+    saved_selected = list(selected)
+    try:
+        if len(selected) < 10 - len(delivered):
+            candidates = [item for item in read_candidates(repository, token, job_ids) if item not in delivered]
+            if not candidates and not cached:
+                raise RuntimeError('No unsent previously read candidates')
+            executor = Executor(config)
+            if isinstance(executor.openai_client, FailoverClient):
+                executor.openai_client.deadline = deadline
+            retriever = executor.retrievers['pubmed']
+            records = retriever._fetch_details(list(delivered) + candidates)
+            papers = [retriever.convert_to_paper(record) for record in records]
+            papers = [paper for paper in papers if paper is not None]
+            by_id = {pmid(paper.url): paper for paper in papers}
+            if any(identifier not in by_id for identifier in delivered):
+                raise RuntimeError('Cannot establish topic of all delivered papers')
+            settings = config.recommendations
+            mode = effective_focus_mode(settings)
+            focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
+            journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
+            today = now.astimezone(SHANGHAI).date()
+            start = today - timedelta(days=int(settings.get('publication_days', 90)))
+            eligible = [by_id[identifier] for identifier in candidates if identifier in by_id and
+                        _publication_in_window(by_id[identifier].publication_date, start, today)]
+            # Today's count is independent of the long-term ledger; only new candidates
+            # are filtered, before journal lookups, verification and reading generation.
+            history_path = Path(os.environ.get('SENT_PAPER_HISTORY_FILE', '.cache/sent-paper-history.json'))
+            if settings.get('exclude_sent', True):
+                history = load_history(history_path, required=os.environ.get('GITHUB_ACTIONS', '').lower() == 'true')
+                seen = set(history['entries'])
+            else:
+                seen = set()
+            for receipt in receipts:
+                for paper in receipt['papers']:
+                    seen.update(paper_keys(paper))
+            eligible = filter_unseen(eligible, seen)
+            if not eligible and not cached:
+                raise RuntimeError('No unseen eligible candidates; no email sent')
+            eligible = enrich_journal_metrics(eligible, config.journals)
+            corpus = executor.filter_corpus(executor.fetch_zotero_corpus())
+            if not corpus:
+                raise RuntimeError('No eligible Zotero references')
+            if executor.reranker is None:
+                executor.reranker = get_reranker_cls(config.executor.reranker)(config)
+            eligible = executor.reranker.rerank(eligible, corpus, keyword_query=None,
+                                                favorite_journals=config.executor.get('favorite_journals', None))
+            focus, library = [], []
+            for paper in eligible:
+                evidence = focus_evidence(paper, mode)
+                if evidence:
+                    paper.recommendation_matches = [evidence]
+                    focus.append(paper)
+                else:
+                    library.append(paper)
+            eligible = focus + verify_recommendations(library, executor.openai_client, config.llm,
+                                                       batch_size=int(settings.get('batch_size', 5)))
+            if settings.get('innovation_enabled', True):
+                assess_innovation(eligible, executor.openai_client, config.llm)
+            if cached:
+                cached_keys = set().union(*(paper_keys(paper) for paper in cached))
+                eligible = cached + [paper for paper in order_candidates(eligible, mode) if not paper_keys(paper) & cached_keys]
+            else:
+                eligible = order_candidates(eligible, mode)
+            selected = []
+            for paper in eligible:
+                if len(selected) >= 10 - len(delivered):
+                    break
+                journal = ' '.join((paper.journal or '').casefold().split())
+                is_focus = bool(focus_evidence(paper, mode))
+                if journal_counts[journal] >= int(settings.get('max_per_journal', 3)) or (is_focus and focus_count >= 9):
+                    continue
+                if paper not in cached:
+                    if time.monotonic() >= deadline:
+                        continue
+                    paper.generate_tldr(executor.openai_client, config.llm)
+                    save_ready(paper, config, corpus)
+                if not paper.reading_card or not paper.abstract_zh or paper.reader_status != 'success':
+                    continue
+                if paper not in cached and time.monotonic() < deadline:
+                    paper.generate_title_translation(executor.openai_client, config.llm)
+                selected.append(paper)
+                journal_counts[journal] += 1
+                focus_count += int(is_focus)
+    except Exception as error:
+        if not saved_selected:
+            raise
+        print(f"New-candidate processing failed ({type(error).__name__}); using saved cards", flush=True)
+        selected = saved_selected
     if not selected:
         raise RuntimeError('No verified complete unsent paper; no email sent')
     count = len(selected)
@@ -224,6 +298,7 @@ def supplement(config, progress=None):
                    'date': confirmed.astimezone(SHANGHAI).date().isoformat(),
                    'recorded_at_utc': confirmed.isoformat(), 'mail_sent': True,
                    'paper_count': count, 'complete_cards': count, 'expected_cards': count,
+                   'reused_complete_cards': sum(bool(getattr(p, '_cache_basis', None)) for p in selected),
                    'quality_passed': True, 'day_expected_cards': 10, 'day_complete_cards': total,
                    'is_supplement': True,
                    'papers': [{'url': p.url, 'journal': p.journal, 'publication_date': p.publication_date,

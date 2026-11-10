@@ -3,6 +3,7 @@ import os
 import random
 import re as _re
 import tempfile
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +23,7 @@ from .recommendations import build_zotero_queries, verify_recommendations
 from .innovation import assess_innovation
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
 from .paper_identity import filter_unseen, load_history, paper_keys, record_sent
+from .card_store import load_ready, save_ready
 from .utils import send_email
 from openai import OpenAI
 from .llm_client import FailoverClient
@@ -58,7 +60,7 @@ class Executor:
         self.config = config
         self.include_path_patterns = normalize_path_patterns(config.zotero.include_path, "include_path")
         self.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, "ignore_path")
-        self.reranker = get_reranker_cls(config.executor.reranker)(config)
+        self.reranker = None
         llm_timeout = float(config.llm.api.get("timeout", 600))
         fallback_models = config.llm.get("fallback_models", [])
         self.openai_client = OpenAI(
@@ -342,6 +344,7 @@ class Executor:
             "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
             "selection_candidates": len(selection),
             "selected_count": sum(item["selected"] for item in selection),
+            "reused_complete_cards": sum(item["selected"] and bool(item.get("cache_basis")) for item in selection),
             "focus_preference_relaxed": getattr(self, "focus_preference_relaxed", False),
             "skip_counts": dict(Counter(reason for item in selection for reason in item["skip_reasons"])),
             "selected_innovation_types": dict(Counter(
@@ -358,8 +361,12 @@ class Executor:
             logger.warning("Could not persist recommendation audit")
 
     def run(self, send_mail: bool = True):
+        started = time.monotonic()
         journals_config = self.config.get("journals", {})
         recommendation_config = self.config.get("recommendations", {})
+        deadline = started + max(0, float(recommendation_config.get("generation_budget_seconds", 4500)))
+        if isinstance(self.openai_client, FailoverClient):
+            self.openai_client.deadline = deadline
         exclude_sent = bool(recommendation_config.get("exclude_sent", True))
         history_path = Path(os.environ.get("SENT_PAPER_HISTORY_FILE", ".cache/sent-paper-history.json"))
         history = load_history(history_path, required=send_mail and os.environ.get("GITHUB_ACTIONS", "").lower() == "true") if exclude_sent else None
@@ -389,116 +396,162 @@ class Executor:
             if len(corpus) == 0:
                 raise ValueError("No eligible Zotero references with abstracts; check collection filters and library contents.")
 
-        if self._search_mode == 5 and "pubmed" in self.retrievers:
-            queries = build_zotero_queries(
-                corpus, openai_client=self.openai_client, llm_params=self.config.llm
-            )
-            queries = list(dict.fromkeys(focus_queries(focus_mode) + queries))
-            self.retrievers["pubmed"].set_pubmed_queries(queries)
-            logger.info(f"Automatic retrieval: {len(corpus)} references, {len(queries)} Zotero/current-focus queries")
-
-        # Step 3: retrieve papers from all sources (in parallel)
-        all_papers = []
-        failed_sources = 0
-        with ThreadPoolExecutor(max_workers=len(self.retrievers)) as pool:
-            future_to_source = {
-                pool.submit(retriever.retrieve_papers): source
-                for source, retriever in self.retrievers.items()
-            }
-            for future in as_completed(future_to_source):
-                source = future_to_source[future]
-                try:
-                    papers = future.result()
-                except Exception as exc:
-                    failed_sources += 1
-                    logger.error(f"Retriever {source} failed ({type(exc).__name__})")
-                    continue
-                if len(papers) == 0:
-                    logger.info(f"No {source} papers found")
-                    continue
-                logger.info(f"Retrieved {len(papers)} {source} papers")
-                all_papers.extend(papers)
-        logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
-        if failed_sources == len(self.retrievers):
-            raise RuntimeError("All literature sources failed; no email was sent.")
-
+        cached = load_ready(self.config, corpus) if verify_related else []
         if exclude_sent:
-            before = len(all_papers)
-            all_papers = filter_unseen(all_papers, set(history["entries"]))
-            logger.info(f"Sent-history filter: {before} to {len(all_papers)} candidates")
+            cached = filter_unseen(cached, set(history["entries"]))
+        # Run the same journal and focus limits before skipping retrieval.
+        target = min(int(self.config.executor.max_paper_num), int(recommendation_config.get("max_papers", 10)))
+        counts, usable, focus = {}, [], 0
+        for candidate in order_candidates(cached, focus_mode):
+            journal = " ".join((candidate.journal or "").casefold().split())
+            is_focus = bool(focus_evidence(candidate, focus_mode))
+            if counts.get(journal, 0) >= int(recommendation_config.get("max_per_journal", 3)):
+                continue
+            if is_focus and focus >= min(int(recommendation_config.get("focus_papers_target", 6)), max(0, target - 1)):
+                continue
+            usable.append(candidate)
+            counts[journal] = counts.get(journal, 0) + 1
+            focus += int(is_focus)
+        cache_fills_target = target > 0 and len(usable) >= target
 
-        # Preprints have no journal IF. Live mode checks journals dynamically
-        # after ranking; the explicit legacy mode retains its static gate.
-        if bool(journals_config.get("enabled", False)):
-            pubmed_retriever = self.retrievers.get("pubmed")
-            before_journal_gate = len(all_papers)
-            if pubmed_retriever is None:
-                all_papers = []
-            elif dynamic_jif:
-                all_papers = [paper for paper in all_papers if paper.source == "pubmed"]
-            else:
-                all_papers = [
-                    paper
-                    for paper in all_papers
-                    if paper.source == "pubmed" and pubmed_retriever.is_allowed_journal(paper.journal)
-                ]
-            logger.info(
-                "PubMed source/journal gate: kept "
-                f"{len(all_papers)} paper(s), excluded "
-                f"{before_journal_gate - len(all_papers)} non-allowlisted/non-PubMed paper(s)."
-            )
+        try:
+            if not cache_fills_target and self._search_mode == 5 and "pubmed" in self.retrievers:
+                queries = build_zotero_queries(
+                    corpus, openai_client=self.openai_client, llm_params=self.config.llm
+                )
+                queries = list(dict.fromkeys(focus_queries(focus_mode) + queries))
+                self.retrievers["pubmed"].set_pubmed_queries(queries)
+                logger.info(f"Automatic retrieval: {len(corpus)} references, {len(queries)} Zotero/current-focus queries")
+
+        except Exception as error:
+            if not cached:
+                raise
+            logger.warning("New-candidate query failed ({}); using saved cards", type(error).__name__)
+            cache_fills_target = True
+
+        if not cache_fills_target and time.monotonic() < deadline:
+            # Step 3: retrieve papers from all sources (in parallel)
+            all_papers = []
+            failed_sources = 0
+            with ThreadPoolExecutor(max_workers=len(self.retrievers)) as pool:
+                future_to_source = {
+                    pool.submit(retriever.retrieve_papers): source
+                    for source, retriever in self.retrievers.items()
+                }
+                for future in as_completed(future_to_source):
+                    source = future_to_source[future]
+                    try:
+                        papers = future.result()
+                    except Exception as exc:
+                        failed_sources += 1
+                        logger.error(f"Retriever {source} failed ({type(exc).__name__})")
+                        continue
+                    if len(papers) == 0:
+                        logger.info(f"No {source} papers found")
+                        continue
+                    logger.info(f"Retrieved {len(papers)} {source} papers")
+                    all_papers.extend(papers)
+            logger.info(f"Total {len(all_papers)} papers retrieved from all sources")
+            if failed_sources == len(self.retrievers) and not cached:
+                raise RuntimeError("All literature sources failed; no email was sent.")
+
+            if exclude_sent:
+                before = len(all_papers)
+                all_papers = filter_unseen(all_papers, set(history["entries"]))
+                logger.info(f"Sent-history filter: {before} to {len(all_papers)} candidates")
+
+            # Preprints have no journal IF. Live mode checks journals dynamically
+            # after ranking; the explicit legacy mode retains its static gate.
+            if bool(journals_config.get("enabled", False)):
+                pubmed_retriever = self.retrievers.get("pubmed")
+                before_journal_gate = len(all_papers)
+                if pubmed_retriever is None:
+                    all_papers = []
+                elif dynamic_jif:
+                    all_papers = [paper for paper in all_papers if paper.source == "pubmed"]
+                else:
+                    all_papers = [
+                        paper
+                        for paper in all_papers
+                        if paper.source == "pubmed" and pubmed_retriever.is_allowed_journal(paper.journal)
+                    ]
+                logger.info(
+                    "PubMed source/journal gate: kept "
+                    f"{len(all_papers)} paper(s), excluded "
+                    f"{before_journal_gate - len(all_papers)} non-allowlisted/non-PubMed paper(s)."
+                )
+
+        else:
+            all_papers = []
 
         reranked_papers = []
-        if len(all_papers) > 0:
-            # IF eligibility is independent of semantic similarity. Exclude
-            # ineligible journals before the more expensive local encoding.
-            all_papers = enrich_journal_metrics(all_papers, journals_config)
-            # Step 4: rerank with mixed scoring
-            logger.info("Reranking papers...")
-            fav_journals = self.config.executor.get("favorite_journals", None)
-            reranked_papers = self.reranker.rerank(
-                all_papers,
-                corpus,
-                keyword_query=self._structured_keywords,
-                favorite_journals=fav_journals,
-            )
-            if verify_related:
-                candidate_limit = int(recommendation_config.get("candidate_limit", 800))
-                reranked_papers = reranked_papers[:candidate_limit]
+        if len(all_papers) > 0 or cached:
+            try:
+                if all_papers and time.monotonic() < deadline:
+                    # IF eligibility is independent of semantic similarity. Exclude
+                    # ineligible journals before the more expensive local encoding.
+                    all_papers = enrich_journal_metrics(all_papers, journals_config)
+                    # Step 4: rerank with mixed scoring
+                    logger.info("Reranking papers...")
+                    fav_journals = self.config.executor.get("favorite_journals", None)
+                    if self.reranker is None:
+                        self.reranker = get_reranker_cls(self.config.executor.reranker)(self.config)
+                    reranked_papers = self.reranker.rerank(
+                        all_papers,
+                        corpus,
+                        keyword_query=self._structured_keywords,
+                        favorite_journals=fav_journals,
+                    )
+                    if verify_related:
+                        candidate_limit = int(recommendation_config.get("candidate_limit", 800))
+                        reranked_papers = reranked_papers[:candidate_limit]
 
-            if verify_related:
-                # Relevance and IF are eligibility gates. Among eligible
-                # candidates, prioritize actual first publication, not indexing.
-                reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
-                verify_limit = int(recommendation_config.get("verify_limit", 120))
-                self.recommendation_audit = []
-                candidates = reranked_papers
-                focus_candidates = []
-                library_candidates = []
-                for paper in candidates:
-                    evidence = focus_evidence(paper, focus_mode)
-                    if evidence:
-                        if len(focus_candidates) >= max(1, verify_limit // 2):
-                            continue
-                        paper.recommendation_matches = [evidence]
-                        focus_candidates.append(paper)
-                        self.recommendation_audit.append({
-                            "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
-                            "jif": (paper.journal_metrics or {}).get("jif"), "related": True,
-                            "basis": "current_focus", "reason": evidence["reason"],
-                        })
-                    else:
-                        library_candidates.append(paper)
-                library_candidates = library_candidates[:verify_limit]
-                verified_library = verify_recommendations(
-                    library_candidates, self.openai_client, self.config.llm,
-                    batch_size=int(recommendation_config.get("batch_size", 5)),
-                    audit=self.recommendation_audit,
-                )
-                reranked_papers = focus_candidates + verified_library
-                if recommendation_config.get("innovation_enabled", True):
-                    assess_innovation(reranked_papers, self.openai_client, self.config.llm)
-                reranked_papers = order_candidates(reranked_papers, focus_mode)
+                    if verify_related and time.monotonic() >= deadline:
+                        reranked_papers = []
+                    if verify_related and time.monotonic() < deadline:
+                        # Relevance and IF are eligibility gates. Among eligible
+                        # candidates, prioritize actual first publication, not indexing.
+                        reranked_papers.sort(key=lambda paper: paper.publication_date or "", reverse=True)
+                        verify_limit = int(recommendation_config.get("verify_limit", 120))
+                        self.recommendation_audit = []
+                        candidates = reranked_papers
+                        focus_candidates = []
+                        library_candidates = []
+                        for paper in candidates:
+                            evidence = focus_evidence(paper, focus_mode)
+                            if evidence:
+                                if len(focus_candidates) >= max(1, verify_limit // 2):
+                                    continue
+                                paper.recommendation_matches = [evidence]
+                                focus_candidates.append(paper)
+                                self.recommendation_audit.append({
+                                    "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
+                                    "jif": (paper.journal_metrics or {}).get("jif"), "related": True,
+                                    "basis": "current_focus", "reason": evidence["reason"],
+                                })
+                            else:
+                                library_candidates.append(paper)
+                        library_candidates = library_candidates[:verify_limit]
+                        verified_library = verify_recommendations(
+                            library_candidates, self.openai_client, self.config.llm,
+                            batch_size=int(recommendation_config.get("batch_size", 5)),
+                            audit=self.recommendation_audit,
+                        )
+                        reranked_papers = focus_candidates + verified_library
+                        if recommendation_config.get("innovation_enabled", True) and time.monotonic() < deadline:
+                            assess_innovation(reranked_papers, self.openai_client, self.config.llm)
+                        reranked_papers = order_candidates(reranked_papers, focus_mode)
+
+            except Exception as error:
+                if not cached:
+                    raise
+                logger.warning("New-candidate processing failed ({}); using saved cards", type(error).__name__)
+                reranked_papers = []
+                cache_fills_target = True
+
+            if cached:
+                cached_keys = set().union(*(paper_keys(paper) for paper in cached))
+                reranked_papers = cached + [paper for paper in reranked_papers if not paper_keys(paper) & cached_keys]
 
             max_paper_num = int(self.config.executor.max_paper_num)
             if verify_related:
@@ -522,6 +575,7 @@ class Executor:
                     "url": paper.url, "journal": paper.journal, "publication_date": paper.publication_date,
                     "jif": (paper.journal_metrics or {}).get("jif"),
                     "innovation": paper.innovation_assessment,
+                    "cache_basis": getattr(paper, "_cache_basis", None),
                     "current_focus": bool(focus_evidence(paper, focus_mode)), "selected": False,
                     "skip_reasons": ["not_processed"],
                 }
@@ -548,6 +602,8 @@ class Executor:
                         continue
                     if len(selected) >= max_paper_num:
                         break
+                    if p not in cached and time.monotonic() >= deadline:
+                        continue
                     journal = " ".join((p.journal or "").casefold().split())
                     is_focus = bool(focus_evidence(p, focus_mode))
                     record = records[id(p)]
@@ -561,11 +617,14 @@ class Executor:
                     attempted.append(p)
                     attempted_ids.add(id(p))
                     logger.info(f"Reading candidate {len(attempted)}; completed {len(selected)}/{max_paper_num}: {p.url}")
-                    p.generate_tldr(self.openai_client, self.config.llm)
+                    if p not in cached:
+                        p.generate_tldr(self.openai_client, self.config.llm)
+                        save_ready(p, self.config, corpus)
                     if p.reading_card is None and require_cards:
                         record["skip_reasons"].append("reading_card_failed")
                         continue
-                    p.generate_title_translation(self.openai_client, self.config.llm)
+                    if p not in cached and time.monotonic() < deadline:
+                        p.generate_title_translation(self.openai_client, self.config.llm)
                     selected.append(p)
                     record["selected"] = True
                     journal_counts[journal] = journal_counts.get(journal, 0) + 1
@@ -595,7 +654,7 @@ class Executor:
 
         # Step 6: generate opening summary
         summary = ""
-        if reranked_papers:
+        if reranked_papers and not cache_fills_target and time.monotonic() < deadline:
             logger.info("Generating email summary...")
             summary = self.generate_email_summary(reranked_papers)
             if verify_related and len(reranked_papers) < max_paper_num:
@@ -631,6 +690,7 @@ class Executor:
                 "recorded_at_utc": confirmed_at.isoformat(),
                 "mail_sent": True,
                 "paper_count": len(reranked_papers),
+                "reused_complete_cards": sum(bool(getattr(p, "_cache_basis", None)) for p in reranked_papers),
                 "complete_cards": complete,
                 "expected_cards": expected,
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),

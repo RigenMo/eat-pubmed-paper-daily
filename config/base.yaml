@@ -11,6 +11,8 @@ search:
 recommendations:
   enabled: true # Verify each candidate against actual Zotero evidence before recommendation.
   exclude_sent: true # Share 180-day confirmed delivery history across daily and supplement emails.
+  card_cache_enabled: true # Reuse only complete, validated, unsent cards under the same policy.
+  generation_budget_seconds: 4500 # 75 minutes inside the 90-minute job, leaving delivery/receipt time.
   publication_days: 90 # Newest first; backfill from the last 90 days when recent eligible cards are insufficient.
   candidate_limit: 800 # Wider coverage for ten complete, diverse recommendations.
   verify_limit: 120 # Verify eligibility before spending time on full reading cards.

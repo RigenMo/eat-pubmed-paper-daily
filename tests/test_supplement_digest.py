@@ -27,6 +27,10 @@ def test_complete_day_skips_network_and_send(monkeypatch, tmp_path):
 
 def test_no_unsent_candidate_does_not_send(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    from zotero_arxiv_daily.paper_identity import record_sent
+    history = tmp_path / 'sent-paper-history.json'
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(history))
+    record_sent(history, [], '2026-11-01')
     monkeypatch.setenv('GITHUB_TOKEN', 'test')
     monkeypatch.setenv('GITHUB_REPOSITORY', 'owner/repo')
     monkeypatch.setenv('GITHUB_RUN_ID', '1')
