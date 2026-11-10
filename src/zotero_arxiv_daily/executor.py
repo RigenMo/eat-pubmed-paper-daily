@@ -344,6 +344,7 @@ class Executor:
             "verified_current_focus": sum(item.get("basis") == "current_focus" for item in audit["relevance"]),
             "selection_candidates": len(selection),
             "selected_count": sum(item["selected"] for item in selection),
+            "reused_complete_cards": sum(item["selected"] and bool(item.get("cache_basis")) for item in selection),
             "focus_preference_relaxed": getattr(self, "focus_preference_relaxed", False),
             "skip_counts": dict(Counter(reason for item in selection for reason in item["skip_reasons"])),
             "selected_innovation_types": dict(Counter(
@@ -689,6 +690,7 @@ class Executor:
                 "recorded_at_utc": confirmed_at.isoformat(),
                 "mail_sent": True,
                 "paper_count": len(reranked_papers),
+                "reused_complete_cards": sum(bool(getattr(p, "_cache_basis", None)) for p in reranked_papers),
                 "complete_cards": complete,
                 "expected_cards": expected,
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),

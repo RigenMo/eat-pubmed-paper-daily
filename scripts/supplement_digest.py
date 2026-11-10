@@ -298,6 +298,7 @@ def supplement(config, progress=None):
                    'date': confirmed.astimezone(SHANGHAI).date().isoformat(),
                    'recorded_at_utc': confirmed.isoformat(), 'mail_sent': True,
                    'paper_count': count, 'complete_cards': count, 'expected_cards': count,
+                   'reused_complete_cards': sum(bool(getattr(p, '_cache_basis', None)) for p in selected),
                    'quality_passed': True, 'day_expected_cards': 10, 'day_complete_cards': total,
                    'is_supplement': True,
                    'papers': [{'url': p.url, 'journal': p.journal, 'publication_date': p.publication_date,
