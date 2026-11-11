@@ -1,0 +1,139 @@
+name: Prepare reading inventory (no email)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/complete-reading-system]
+    paths:
+      - .github/workflows/reading-inventory.yml
+      - scripts/build_reading_inventory.py
+      - src/zotero_arxiv_daily/curation.py
+  schedule:
+    - cron: '15 6 * * *' # 14:15 Shanghai.
+    - cron: '15 12 * * *' # 20:15 Shanghai, before next morning.
+
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: reading-inventory-producer
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v6
+      - name: Protect morning senders
+        id: gate
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.setOutput('run', 'false');
+            const validation = context.eventName === 'push' && context.ref !== 'refs/heads/main';
+            const hour = Number(new Intl.DateTimeFormat('en-GB', {timeZone: 'Asia/Shanghai', hour:'2-digit', hourCycle:'h23'}).format(new Date()));
+            core.setOutput('validation', String(validation));
+            if (!validation && (hour < 12 || hour >= 23)) return;
+            try {
+              const groups = await Promise.all(['in_progress','queued'].map(status =>
+                github.paginate(github.rest.actions.listWorkflowRunsForRepo, {...context.repo, status, per_page:100})));
+              if (groups.flat().some(r => ['.github/workflows/main.yml','.github/workflows/supplement.yml','.github/workflows/test.yml'].includes(r.path))) return;
+              core.setOutput('run', 'true');
+            } catch { core.info('Sender status unavailable; postpone optional stock preparation.'); }
+      - name: Setup uv
+        id: uv
+        continue-on-error: true
+        if: steps.gate.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install uv if release download failed
+        if: steps.uv.outcome == 'failure'
+        timeout-minutes: 3
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/uv-bootstrap" uv
+          echo "$RUNNER_TEMP/uv-bootstrap/bin" >> "$GITHUB_PATH"
+      - name: Reconcile confirmed send history
+        if: steps.gate.outputs.run == 'true'
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/sent_paper_history.py prepare
+      - name: Restore approved stock
+        if: steps.gate.outputs.run == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+        run: node scripts/card_inventory.mjs restore
+      - name: Prepare approved cards without SMTP credentials
+        if: steps.gate.outputs.run == 'true'
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_CHECKPOINT_GITHUB: 'true'
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_MODEL: ${{ vars.LLM_BACKUP_MODEL }}
+          RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
+          CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
+          INVENTORY_BUILD_SECONDS: ${{ steps.gate.outputs.validation == 'true' && '480' || '2700' }}
+          INVENTORY_MAX_NEW_CARDS: ${{ steps.gate.outputs.validation == 'true' && '1' || '12' }}
+        run: |
+          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
+          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+      - name: Preserve stock after partial failure
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+        run: node scripts/card_inventory.mjs pack
+      - name: Upload encrypted approved inventory
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reading-card-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .cache/card-inventory.enc
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Extend completed reading independently
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.validation != 'true'
+        continue-on-error: true
+        timeout-minutes: 6
+        env:
+          PYTHONPATH: src:.
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_MODEL: ${{ vars.LLM_BACKUP_MODEL }}
+          RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ "$(TZ=Asia/Shanghai date +%u)" = '1' ] && [ "$EVENT_SCHEDULE" = '15 12 * * *' ]; then export WEEKLY_SYNTHESIS=true; fi
+          uv run python scripts/extend_reading.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 recommendations.card_cache_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+      - name: Encrypt optional extensions
+        if: always()
+        continue-on-error: true
+        env:
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+          CARD_STORE_DIR: .cache/reading-extensions
+          CARD_INVENTORY_FILE: .cache/reading-extensions.enc
+        run: node scripts/card_inventory.mjs pack
+      - name: Upload encrypted deep reading and weekly questions
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: reading-extensions-encrypted
+          path: .cache/reading-extensions.enc
+          if-no-files-found: ignore
+          retention-days: 14

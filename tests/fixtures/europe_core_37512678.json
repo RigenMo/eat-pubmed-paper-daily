@@ -1,0 +1,256 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "request": {
+    "queryString": "EXT_ID:37512678 AND SRC:MED",
+    "internalQuery": "EXT_ID:37512678 AND SRC:MED",
+    "resultType": "CORE",
+    "cursorMark": "*",
+    "pageSize": 25,
+    "sort": "",
+    "synonym": false
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "37512678",
+        "source": "MED",
+        "pmid": "37512678",
+        "pmcid": "PMC10384638",
+        "fullTextIdList": {
+          "fullTextId": [
+            "PMC10384638"
+          ]
+        },
+        "doi": "10.3390/mi14071367",
+        "title": "Memristor Crossbar Circuits Implementing Equilibrium Propagation for On-Device Learning.",
+        "authorString": "Oh S, An J, Cho S, Yoon R, Min KS.",
+        "authorList": {
+          "author": [
+            {
+              "fullName": "Oh S",
+              "lastName": "Oh",
+              "firstName": "Seokjin",
+              "initials": "S",
+              "authorAffiliationDetailsList": {
+                "authorAffiliation": [
+                  {
+                    "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea."
+                  }
+                ]
+              }
+            },
+            {
+              "fullName": "An J",
+              "lastName": "An",
+              "firstName": "Jiyong",
+              "initials": "J",
+              "authorId": {
+                "type": "ORCID",
+                "value": "0000-0003-3793-028X"
+              },
+              "authorAffiliationDetailsList": {
+                "authorAffiliation": [
+                  {
+                    "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea."
+                  }
+                ]
+              }
+            },
+            {
+              "fullName": "Cho S",
+              "lastName": "Cho",
+              "firstName": "Seungmyeong",
+              "initials": "S",
+              "authorId": {
+                "type": "ORCID",
+                "value": "0009-0008-4577-0128"
+              },
+              "authorAffiliationDetailsList": {
+                "authorAffiliation": [
+                  {
+                    "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea."
+                  }
+                ]
+              }
+            },
+            {
+              "fullName": "Yoon R",
+              "lastName": "Yoon",
+              "firstName": "Rina",
+              "initials": "R",
+              "authorAffiliationDetailsList": {
+                "authorAffiliation": [
+                  {
+                    "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea."
+                  }
+                ]
+              }
+            },
+            {
+              "fullName": "Min KS",
+              "lastName": "Min",
+              "firstName": "Kyeong-Sik",
+              "initials": "KS",
+              "authorId": {
+                "type": "ORCID",
+                "value": "0000-0002-1518-7037"
+              },
+              "authorAffiliationDetailsList": {
+                "authorAffiliation": [
+                  {
+                    "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea."
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "authorIdList": {
+          "authorId": [
+            {
+              "type": "ORCID",
+              "value": "0000-0002-1518-7037"
+            },
+            {
+              "type": "ORCID",
+              "value": "0000-0003-3793-028X"
+            },
+            {
+              "type": "ORCID",
+              "value": "0009-0008-4577-0128"
+            }
+          ]
+        },
+        "journalInfo": {
+          "issue": "7",
+          "volume": "14",
+          "journalIssueId": 3607342,
+          "dateOfPublication": "2023 Jul",
+          "monthOfPublication": 7,
+          "yearOfPublication": 2023,
+          "journal": {
+            "medlineAbbreviation": "Micromachines (Basel)",
+            "title": "Micromachines",
+            "essn": "2072-666X",
+            "issn": "2072-666X",
+            "nlmid": "101640903",
+            "isoabbreviation": "Micromachines (Basel)"
+          },
+          "printPublicationDate": "2023-07-01"
+        },
+        "pubYear": "2023",
+        "pageInfo": "1367",
+        "abstractText": "Equilibrium propagation (EP) has been proposed recently as a new neural network training algorithm based on a local learning concept, where only local information is used to calculate the weight update of the neural network. Despite the advantages of local learning, numerical iteration for solving the EP dynamic equations makes the EP algorithm less practical for realizing edge intelligence hardware. Some analog circuits have been suggested to solve the EP dynamic equations physically, not numerically, using the original EP algorithm. However, there are still a few problems in terms of circuit implementation: for example, the need for storing the free-phase solution and the lack of essential peripheral circuits for calculating and updating synaptic weights. Therefore, in this paper, a new analog circuit technique is proposed to realize the EP algorithm in practical and implementable hardware. This work has two major contributions in achieving this objective. First, the free-phase and nudge-phase solutions are calculated by the proposed analog circuits simultaneously, not at different times. With this process, analog voltage memories or digital memories with converting circuits between digital and analog domains for storing the free-phase solution temporarily can be eliminated in the proposed EP circuit. Second, a simple EP learning rule relying on a fixed amount of conductance change per programming pulse is newly proposed and implemented in peripheral circuits. The modified EP learning rule can make the weight update circuit practical and implementable without requiring the use of a complicated program verification scheme. The proposed memristor conductance update circuit is simulated and verified for training synaptic weights on memristor crossbars. The simulation results showed that the proposed EP circuit could be used for realizing on-device learning in edge intelligence hardware.",
+        "affiliation": "School of Electrical Engineering, Kookmin University, Seoul 02707, Republic of Korea.",
+        "publicationStatus": "epublish",
+        "language": "eng",
+        "pubModel": "Electronic",
+        "pubTypeList": {
+          "pubType": [
+            "research-article",
+            "Journal Article"
+          ]
+        },
+        "grantsList": {
+          "grant": [
+            {
+              "agency": "NRF",
+              "grantId": "2021R1A2C1011631",
+              "orderIn": 0
+            },
+            {
+              "agency": "NRF",
+              "grantId": "2021M3F3A2A01037972",
+              "orderIn": 0
+            },
+            {
+              "agency": "National Research Foundation of Korea",
+              "grantId": "NRF-2022R1A5A7000765",
+              "orderIn": 0
+            },
+            {
+              "agency": "National Research Foundation of Korea",
+              "grantId": "NRF-2021M3F3A2A01037972",
+              "orderIn": 0
+            },
+            {
+              "agency": "National Research Foundation of Korea",
+              "grantId": "NRF-2021R1A2C1011631",
+              "orderIn": 0
+            },
+            {
+              "agency": "NRF",
+              "grantId": "2022R1A5A7000765",
+              "orderIn": 0
+            }
+          ]
+        },
+        "keywordList": {
+          "keyword": [
+            "Local Learning",
+            "On-device Learning",
+            "Equilibrium Propagation",
+            "Memristor Crossbar Circuits"
+          ]
+        },
+        "fullTextUrlList": {
+          "fullTextUrl": [
+            {
+              "availability": "Open access",
+              "availabilityCode": "OA",
+              "documentStyle": "pdf",
+              "site": "Unpaywall",
+              "url": "https://www.mdpi.com/2072-666X/14/7/1367/pdf?version=1688377497"
+            },
+            {
+              "availability": "Subscription required",
+              "availabilityCode": "S",
+              "documentStyle": "doi",
+              "site": "DOI",
+              "url": "https://doi.org/10.3390/mi14071367"
+            },
+            {
+              "availability": "Open access",
+              "availabilityCode": "OA",
+              "documentStyle": "html",
+              "site": "Europe_PMC",
+              "url": "https://europepmc.org/articles/PMC10384638"
+            },
+            {
+              "availability": "Open access",
+              "availabilityCode": "OA",
+              "documentStyle": "pdf",
+              "site": "Europe_PMC",
+              "url": "https://europepmc.org/articles/PMC10384638?pdf=render"
+            }
+          ]
+        },
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "inPMC": "Y",
+        "citedByCount": 2,
+        "hasReferences": "Y",
+        "hasTextMinedTerms": "Y",
+        "hasDbCrossReferences": "N",
+        "hasPDF": "Y",
+        "hasBook": "N",
+        "hasSuppl": "N",
+        "hasLabsLinks": "N",
+        "hasData": "N",
+        "license": "cc by",
+        "authMan": "N",
+        "epmcAuthMan": "N",
+        "nihAuthMan": "N",
+        "hasTMAccessionNumbers": "N",
+        "dateOfCreation": "2023-07-29",
+        "dateOfRevision": "2023-08-01",
+        "electronicPublicationDate": "2023-07-03",
+        "firstPublicationDate": "2023-07-03",
+        "firstIndexDate": "2023-07-30",
+        "fullTextReceivedDate": "2023-08-20",
+        "hasEvaluations": "N"
+      }
+    ]
+  }
+}

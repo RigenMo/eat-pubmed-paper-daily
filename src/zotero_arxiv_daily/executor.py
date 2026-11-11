@@ -23,7 +23,7 @@ from .recommendations import build_zotero_queries, verify_recommendations
 from .innovation import assess_innovation
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
 from .paper_identity import filter_unseen, load_history, paper_keys, record_sent
-from .card_store import load_ready, save_ready
+from .card_store import load_ready, load_offline_ready, save_ready
 from .utils import send_email
 from openai import OpenAI
 from .llm_client import FailoverClient
@@ -76,6 +76,13 @@ class Executor:
                 model_timeout=config.llm.get("fallback_model_timeout", 90),
                 cooldown=config.llm.get("fallback_cooldown", 900),
             )
+            secondary = config.llm.get("secondary_api", {})
+            if all(secondary.get(field) for field in ("key", "base_url", "model")):
+                backup = OpenAI(api_key=secondary.key, base_url=secondary.base_url,
+                                timeout=llm_timeout, max_retries=0)
+                self.openai_client.backup_client = FailoverClient(
+                    backup, [secondary.model], total_timeout=240, model_timeout=120,
+                )
 
         # Validate search mode vs keywords
         search_mode = int(config.search.mode)
@@ -220,7 +227,17 @@ class Executor:
         collections = zot.everything(zot.collections())
         collections = {c['key']: c for c in collections}
         corpus = zot.everything(zot.items(itemType='conferencePaper || journalArticle || preprint'))
-        corpus = [c for c in corpus if c['data']['abstractNote'] != '']
+        # Even a saved record without an abstract is already known to the user.
+        # Keep its public identity in memory; only the recommendation corpus
+        # needs an abstract. Private Zotero fields are never exported here.
+        self.zotero_read_keys, self.zotero_read_titles = set(), set()
+        for item in corpus:
+            data = item.get('data', {})
+            self.zotero_read_keys.update(paper_keys({'url': data.get('url'), 'doi': data.get('DOI')}))
+            title = ' '.join(str(data.get('title') or '').casefold().split())
+            if title:
+                self.zotero_read_titles.add(title)
+        corpus = [c for c in corpus if c.get('data', {}).get('abstractNote', '').strip()]
 
         def get_collection_path(col_key: str) -> str:
             if p := collections[col_key]['data']['parentCollection']:
@@ -375,10 +392,8 @@ class Executor:
         self.focus_mode = focus_mode
         self.focus_preference_relaxed = False
         dynamic_jif = bool(journals_config.get("enabled", False)) and journals_config.get("mode") == "easyscholar"
-        if dynamic_jif:
-            service_config = journals_config.get("easyscholar", {})
-            if not service_config.get("enabled", False) or not service_config.get("api_key", ""):
-                raise ValueError("Set EASYSCHOLAR_API_KEY to apply the live IF filter across all journals.")
+        service_config = journals_config.get("easyscholar", {})
+        live_metrics_missing = dynamic_jif and (not service_config.get("enabled", False) or not service_config.get("api_key", ""))
         # Step 1: extract structured keywords if needed
         if self._search_mode < 5 and self._keywords_raw:
             kw = self._extract_structured_keywords(self._keywords_raw)
@@ -390,15 +405,26 @@ class Executor:
 
         # Step 2: fetch Zotero corpus (skip if mode=1)
         corpus: list[CorpusPaper] = []
+        offline_cached = []
         if self._search_mode > 1:
-            corpus = self.fetch_zotero_corpus()
-            corpus = self.filter_corpus(corpus)
-            if len(corpus) == 0:
-                raise ValueError("No eligible Zotero references with abstracts; check collection filters and library contents.")
+            try:
+                corpus = self.fetch_zotero_corpus()
+                corpus = self.filter_corpus(corpus)
+                if len(corpus) == 0:
+                    raise ValueError("No eligible Zotero references with abstracts; check collection filters and library contents.")
+            except Exception:
+                offline_cached = load_offline_ready(self.config) if verify_related else []
+                if not offline_cached:
+                    raise
+                logger.warning("Library check unavailable; using only approved cognitive stock from the last 24 hours")
 
-        cached = load_ready(self.config, corpus) if verify_related else []
+        cached = offline_cached or (load_ready(self.config, corpus) if verify_related else [])
         if exclude_sent:
             cached = filter_unseen(cached, set(history["entries"]))
+        cached = filter_unseen(cached, getattr(self, 'zotero_read_keys', set()))
+        cached = [p for p in cached if ' '.join((p.title or '').casefold().split()) not in getattr(self, 'zotero_read_titles', set())]
+        if live_metrics_missing and not cached:
+            raise ValueError("Set EASYSCHOLAR_API_KEY to apply the live IF filter across all journals.")
         # Run the same journal and focus limits before skipping retrieval.
         target = min(int(self.config.executor.max_paper_num), int(recommendation_config.get("max_papers", 10)))
         counts, usable, focus = {}, [], 0
@@ -412,7 +438,7 @@ class Executor:
             usable.append(candidate)
             counts[journal] = counts.get(journal, 0) + 1
             focus += int(is_focus)
-        cache_fills_target = target > 0 and len(usable) >= target
+        cache_fills_target = bool(offline_cached) or (live_metrics_missing and bool(cached)) or (target > 0 and len(usable) >= target)
 
         try:
             if not cache_fills_target and self._search_mode == 5 and "pubmed" in self.retrievers:
@@ -459,6 +485,10 @@ class Executor:
                 before = len(all_papers)
                 all_papers = filter_unseen(all_papers, set(history["entries"]))
                 logger.info(f"Sent-history filter: {before} to {len(all_papers)} candidates")
+
+            if getattr(self, 'zotero_read_keys', set()):
+                all_papers = filter_unseen(all_papers, self.zotero_read_keys)
+            all_papers = [p for p in all_papers if ' '.join((p.title or '').casefold().split()) not in getattr(self, 'zotero_read_titles', set())]
 
             # Preprints have no journal IF. Live mode checks journals dynamically
             # after ranking; the explicit legacy mode retains its static gate.
@@ -659,6 +689,12 @@ class Executor:
             summary = self.generate_email_summary(reranked_papers)
             if verify_related and len(reranked_papers) < max_paper_num:
                 summary = f"本期推荐{len(reranked_papers)}/{max_paper_num}篇；未放宽筛选条件补数。\n\n" + summary
+        if reranked_papers and not summary:
+            summary = f"本期推荐{len(reranked_papers)}/{max_paper_num}篇。"
+            characters = self.config.executor.get('character_pool', []) or []
+            if characters:
+                name = _re.split(r'[（(]', str(random.choice(characters)['name']), maxsplit=1)[0].strip()
+                summary += '\n\n——' + name
 
         # Step 7: prepare the same content for a real send or a no-send preflight.
         email_content = render_email(reranked_papers, summary=summary or None)
@@ -690,12 +726,14 @@ class Executor:
                 "recorded_at_utc": confirmed_at.isoformat(),
                 "mail_sent": True,
                 "paper_count": len(reranked_papers),
+                "library_checked": not bool(offline_cached),
                 "reused_complete_cards": sum(bool(getattr(p, "_cache_basis", None)) for p in reranked_papers),
                 "complete_cards": complete,
                 "expected_cards": expected,
                 "quality_passed": expected > 0 and len(reranked_papers) >= expected and complete == len(reranked_papers),
                 "papers": [
                     {"url": p.url, "journal": p.journal, "publication_date": p.publication_date,
+                     "current_focus": bool(focus_evidence(p, focus_mode)),
                      "jif": (p.journal_metrics or {}).get("jif"), "identity_keys": sorted(paper_keys(p))}
                     for p in reranked_papers
                 ],

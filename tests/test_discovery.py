@@ -31,36 +31,62 @@ def test_sampling_shortfall_fills_without_duplicates():
     assert any('counterevidence' in p.discovery_channels for p in selected)
 
 
-def test_public_retrieval_uses_four_bounded_channels():
+def test_public_retrieval_uses_four_bounded_channels(monkeypatch):
+    import requests
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
     calls = []
-    def get(url, params, timeout):
-        calls.append(params)
-        data = {'resultList': {'result': [{'source': 'MED', 'id': str(len(calls)), 'title': 'Public', 'abstractText': 'Original abstract.', 'firstPublicationDate': '2026-11-01', 'journalInfo': {'journal': {'title': 'Example Journal'}}, 'authorList': {'author': [{'fullName': 'First Author'}]}}]}}
-        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: data)
+    def get(url, params, timeout, **kwargs):
+        calls.append((url, params, timeout))
+        if 'europepmc' not in url:
+            raise requests.ConnectionError()
+        channel_id = next(i for i, term in enumerate(('UK Biobank', 'measurement error', 'CITES:', 'negative results'), 1) if term in params['query'])
+        item = {'source': 'MED', 'id': str(channel_id), 'title': 'Public', 'abstractText': 'A &amp; B.',
+                'firstPublicationDate': '2026-11-01', 'electronicPublicationDate': '2026-11-01',
+                'journalInfo': {'journal': {'title': 'Example Journal'}}, 'authorList': {'author': [{'fullName': 'First Author'}]}}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'resultList': {'result': [item]}})
     result, audit = discover(today=date(2026, 11, 11), per_channel=30, get=get)
     assert len(result) == len(audit) == 4
-    assert result[0].journal == 'Example Journal'
-    assert result[0].authors == ['First Author']
-    assert result[0].source == 'pubmed'
-    assert calls[2]['pageSize'] == 10
-    assert 'CITES:8521067_MED' in calls[2]['query']
-    assert all('FIRST_PDATE:[2026-08-13 TO 2026-11-11]' in call['query'] for call in calls)
-    assert all(set(p.source_metadata[0]) == {'provider', 'channel', 'pmid'} for p in result)
+    assert all(item['status'] == 'success' for item in audit)
+    assert all(p.source == 'pubmed' and p.abstract == 'A & B.' for p in result)
+    assert all(p.journal == 'Example Journal' for p in result)
+    epmc = [params for url, params, _ in calls if 'europepmc' in url]
+    assert len(epmc) == 4
+    assert next(p for p in epmc if 'CITES:' in p['query'])['pageSize'] == 10
+    assert all('FIRST_PDATE:[2026-08-13 TO 2026-11-11]' in p['query'] for p in epmc)
+    assert len([1 for url, _, _ in calls if 'openalex.org' in url]) == 1
+    assert all(timeout <= 8 for _, _, timeout in calls)
 
 
-def test_channel_failure_does_not_stop_other_channels():
+def test_channel_failure_does_not_stop_other_channels(monkeypatch):
     import requests
-    calls = []
-    def get(url, params, timeout):
-        calls.append(params)
-        if len(calls) == 1:
-            raise requests.ConnectionError('unavailable')
-        data = {'resultList': {'result': [{'source': 'MED', 'id': str(len(calls)), 'title': 'Title', 'abstractText': 'An abstract', 'firstPublicationDate': '2026-11-01'}]}}
-        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: data)
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    def get(url, params, timeout, **kwargs):
+        if 'europepmc' not in url or 'UK Biobank' in params['query']:
+            raise requests.ConnectionError()
+        channel_id = next(i for i, term in enumerate(('measurement error', 'CITES:', 'negative results'), 2) if term in params['query'])
+        item = {'source': 'MED', 'id': str(channel_id), 'title': 'Title', 'abstractText': 'An abstract',
+                'firstPublicationDate': '2026-11-01', 'printPublicationDate': '2026-11-01'}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'resultList': {'result': [item]}})
     result, audit = discover(today=date(2026, 11, 11), get=get)
     assert len(result) == 3
-    assert audit[0]['status'] == 'ConnectionError'
-    assert all(item['status'] == 'ok' for item in audit[1:])
+    assert audit[0]['status'] == 'unavailable' and audit[0]['returned'] is None
+    assert all(item['status'] == 'success' for item in audit[1:])
+
+
+def test_openalex_only_stays_unverified_and_missing_dates_rejected(monkeypatch):
+    import requests
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    def get(url, params, timeout, **kwargs):
+        if 'openalex.org' not in url:
+            raise requests.Timeout()
+        item = {'id': 'https://openalex.org/W123', 'title': 'Public methods', 'publication_date': '2026-11-01',
+                'abstract_inverted_index': {'Useful': [0], 'methods': [1]}, 'doi': 'https://doi.org/10.1/example'}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'results': [item]})
+    result, audit = discover(today=date(2026, 11, 11), get=get)
+    assert len(result) == 1 and result[0].source == 'openalex'
+    assert result[0].abstract == 'Useful methods' and result[0].journal is None
+    assert result[0].source_metadata[0]['pubmed_verified'] is False
+    assert audit[0]['status'] == 'unavailable' and audit[1]['status'] == 'success'
 
 
 def test_shortfall_is_round_robin_not_hard_quota():
@@ -91,3 +117,38 @@ def test_evaluation_rejects_invented_quotes_but_resource_does_not_downrank():
     assert not result[0]['new_valid'] and not result[0]['new_eligible'] and p.thought_card is None
     result = module.evaluate([p], client_for({'items': 'malformed'}), 'model', time.monotonic() + 5)
     assert result[0]['new'] is None
+
+
+def test_real_europe_core_schema_and_explicit_date():
+    import json
+    from pathlib import Path
+    from zotero_arxiv_daily.discovery import _europe_channel
+    payload = json.loads((Path(__file__).parents[1] / 'tests/fixtures/europe_core_37512678.json').read_text(encoding='utf-8'))
+    get = lambda *args, **kwargs: SimpleNamespace(raise_for_status=lambda: None, json=lambda: payload)
+    papers, returned = _europe_channel('frontier', 'public', 1, date(2023, 8, 20), 90, get)
+    assert returned == 1 and len(papers) == 1 and papers[0].pmid == '37512678'
+    assert papers[0].abstract and papers[0].publication_date
+    payload['resultList']['result'][0].pop('electronicPublicationDate', None)
+    payload['resultList']['result'][0].pop('printPublicationDate', None)
+    papers, returned = _europe_channel('frontier', 'public', 1, date(2023, 8, 20), 90, get)
+    assert returned == 1 and papers == []
+
+
+def test_openalex_pmid_is_upgraded_only_after_real_core_metadata(monkeypatch):
+    import requests
+    import zotero_arxiv_daily.discovery as module
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    def get(url, params, timeout, **kwargs):
+        if 'openalex.org' not in url:
+            raise requests.ConnectionError()
+        item = {'id': 'https://openalex.org/W123', 'title': 'OpenAlex title', 'publication_date': '2026-11-01',
+                'abstract_inverted_index': {'Exploratory': [0]}, 'ids': {'pmid': 'https://pubmed.ncbi.nlm.nih.gov/123/'}}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'results': [item]})
+    # A trailing slash is accepted by the OpenAlex external identifier parser.
+    item_record = {'PMID': '123', 'TI': 'Verified title', 'AB': 'Verified abstract', 'JT': 'Journal', 'AU': [], 'publication_date': '2026-11-01'}
+    monkeypatch.setattr(module, 'fetch_public_records', lambda ids, max_requests: [item_record] if ids == ['123'] else [])
+    papers, _ = discover(today=date(2026, 11, 11), get=get)
+    assert len(papers) == 1 and papers[0].source == 'pubmed'
+    assert papers[0].title == 'Verified title'
+    assert {m['provider'] for m in papers[0].source_metadata} == {'OpenAlex', 'Europe PMC'}
+

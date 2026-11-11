@@ -45,6 +45,10 @@ jobs:
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_MODEL: ${{ vars.LLM_BACKUP_MODEL }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
           EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |

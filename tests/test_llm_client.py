@@ -212,3 +212,35 @@ def test_whole_generation_deadline_caps_request_and_blocks_new_call():
     with pytest.raises(TimeoutError):
         client.create(model=MODELS[0])
     assert len(calls) == 1
+
+
+def test_endpoint_outage_is_not_reprobed_until_cooldown():
+    now, calls = [0.0], []
+    def fail(**kwargs):
+        calls.append(kwargs['model'])
+        raise error(503)
+    client = client_with(fail, lambda: now[0])
+    for _ in range(2):
+        with pytest.raises(openai.APIStatusError):
+            client.create(model=MODELS[0])
+    assert len(calls) == 4
+    now[0] = 61
+    with pytest.raises(openai.APIStatusError):
+        client.create(model=MODELS[0])
+    assert len(calls) == 8
+
+
+def test_independent_backup_uses_own_model_and_remaining_budget():
+    now, calls = [0.0], []
+    def fail(**kwargs):
+        now[0] += kwargs['timeout']
+        raise error(503)
+    def succeed(**kwargs):
+        calls.append(kwargs)
+        return 'backup-ok'
+    client = client_with(fail, lambda: now[0])
+    client.backup_client = FailoverClient(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=succeed))),
+                                        ['backup-model'], clock=lambda: now[0])
+    assert client.create(model=MODELS[0], timeout=120) == 'backup-ok'
+    assert calls[0]['model'] == 'backup-model'
+    assert calls[0]['timeout'] <= 60

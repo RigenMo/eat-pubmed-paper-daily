@@ -251,6 +251,19 @@ def test_fetch_zotero_corpus_paper_with_zero_collections(config, monkeypatch):
     assert corpus[0].paths == []
 
 
+def test_known_zotero_id_without_abstract_is_still_excluded(config, monkeypatch):
+    from tests.canned_responses import make_stub_zotero_client
+    from zotero_arxiv_daily.paper_identity import paper_keys
+    items = [{'data': {'title': 'Saved without abstract', 'abstractNote': '',
+                      'DOI': '10.1234/known', 'collections': []}}]
+    monkeypatch.setattr('zotero_arxiv_daily.executor.zotero.Zotero', lambda *a, **kw: make_stub_zotero_client(items=items))
+    executor = Executor.__new__(Executor)
+    executor.config = config
+    assert executor.fetch_zotero_corpus() == []
+    assert paper_keys({'doi': '10.1234/known'}) <= executor.zotero_read_keys
+    assert 'saved without abstract' in executor.zotero_read_titles
+
+
 # ---------------------------------------------------------------------------
 # E2E: Executor.run()
 # ---------------------------------------------------------------------------
