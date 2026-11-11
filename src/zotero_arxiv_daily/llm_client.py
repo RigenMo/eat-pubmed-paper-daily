@@ -69,6 +69,7 @@ class FailoverClient:
         # An independently configured endpoint gets part of this same budget.
         deadline = now + (budget / 2 if self.backup_client is not None else budget)
         last_error = None
+        failed_attempts = 0
         for index, model in enumerate(available):
             remaining = deadline - self.clock()
             if remaining <= 0:
@@ -99,6 +100,7 @@ class FailoverClient:
                 if not retryable:
                     raise
                 logger.warning("LLM model {} failed: type={} status={}", model, type(error).__name__, status)
+                failed_attempts += 1
                 self.failed_until[model] = self.clock() + self.cooldown
                 if self.preferred == model:
                     self.preferred = None
@@ -112,8 +114,9 @@ class FailoverClient:
             self.failed_until.pop(model, None)
             return result
         if last_error is not None:
-            self.endpoint_failed_until = self.clock() + min(60, self.cooldown)
-            self.endpoint_error = last_error
+            if failed_attempts == len(available):
+                self.endpoint_failed_until = self.clock() + min(60, self.cooldown)
+                self.endpoint_error = last_error
             return self._backup_or_raise(kwargs, request_deadline, last_error)
         raise TimeoutError("LLM request budget exhausted")
 

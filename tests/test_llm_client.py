@@ -244,3 +244,16 @@ def test_independent_backup_uses_own_model_and_remaining_budget():
     assert client.create(model=MODELS[0], timeout=120) == 'backup-ok'
     assert calls[0]['model'] == 'backup-model'
     assert calls[0]['timeout'] <= 60
+
+
+def test_request_budget_expiry_does_not_mark_untried_endpoint_down():
+    now, calls = [0.0], []
+    def fail(**kwargs):
+        calls.append(kwargs['model'])
+        now[0] += 250
+        raise error(503)
+    client = client_with(fail, lambda: now[0])
+    with pytest.raises(openai.APIStatusError):
+        client.create(model=MODELS[0], timeout=120)
+    assert calls == [MODELS[0]]
+    assert client.endpoint_failed_until == 0

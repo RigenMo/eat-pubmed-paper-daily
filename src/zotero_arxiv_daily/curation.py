@@ -169,10 +169,11 @@ def curate(config, deadline=None, max_new=12):
         with open_dict(llm.generation_kwargs):
             llm.generation_kwargs.timeout = 180
         consecutive_failures = 0
-        for offset in range(0, len(candidates), 5):
+        batch_size = min(3, max_new)
+        for offset in range(0, len(candidates), batch_size):
             if counts['prepared'] >= max_new or counts['stock_after'] >= 20 or time.monotonic() >= deadline:
                 break
-            batch = candidates[offset:offset + 5]
+            batch = candidates[offset:offset + batch_size]
             try:
                 stage = 'thought_review'
                 approved = _bounded(lambda: evaluate_batch(batch, client, llm.generation_kwargs.model, deadline), deadline)
