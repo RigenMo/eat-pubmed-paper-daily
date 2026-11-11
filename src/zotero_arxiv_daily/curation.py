@@ -252,6 +252,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None):
                     continue
     except BackgroundWorkPaused:
         counts['status'] = 'paused_for_sender'
+        counts['pause_reason'] = getattr(should_yield, 'reason', 'sender_has_priority')
     except Exception as error:
         counts['status'] = 'stock_unavailable'
         counts['failure_stage'], counts['error_type'] = locals().get('stage', 'setup_or_library'), type(error).__name__
