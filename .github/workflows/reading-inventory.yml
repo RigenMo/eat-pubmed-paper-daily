@@ -66,6 +66,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
         run: node scripts/card_inventory.mjs restore
+      - name: Validate encrypted checkpoint without sending
+        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.validation == 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+        run: |
+          node scripts/card_inventory.mjs checkpoint
+          node scripts/card_inventory.mjs verify-checkpoint
       - name: Prepare approved cards without SMTP credentials
         if: steps.gate.outputs.run == 'true'
         env:

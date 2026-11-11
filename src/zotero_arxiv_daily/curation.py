@@ -8,6 +8,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from omegaconf import open_dict
 
 from .card_store import load_ready, save_ready
 from .discovery import discover, sample_candidates
@@ -79,6 +80,9 @@ def evaluate_batch(papers, client, model, deadline):
         if str(i) in duplicates or not validate_thought_card(item, paper.abstract):
             continue
         paper.thought_card = {field: item[field] for field in THOUGHT_FIELDS}
+        # Only resource names are confirmed in this system. No field-level
+        # access, follow-up, pairing or experimental conditions were supplied.
+        paper.thought_card['resource_feasibility'] = 'uncertain'
         paper.innovation_assessment = {'type': 'uncertain', 'reason': '仅据摘要，未核实与既有研究的比较。',
                                        'evidence': '', 'scope': 'abstract'}
         paper._approval_basis = 'cognitive_transfer'
@@ -138,30 +142,38 @@ def curate(config, deadline=None, max_new=12):
             return counts
         journal_counts = Counter(' '.join((p.journal or '').casefold().split()) for p in stock)
         stock_keys = set().union(*(paper_keys(p) for p in stock)) if stock else set()
-        candidates, audit = _bounded(lambda: discover(per_channel=30), deadline)
+        stage = 'discovery'
+        candidates, audit = _bounded(lambda: discover(per_channel=100), deadline)
         counts['discovered'] = len(candidates)
+        counts['discovery'] = audit
         if not any(item.get('status') in ('ok', 'success', 'true_empty') for item in audit):
             raise RuntimeError('discovery unavailable')
         # Discovery promotes OpenAlex records only after independent PubMed verification.
         candidates = [p for p in filter_unseen(candidates, seen | stock_keys)
                       if p.source == 'pubmed' and _title(p) not in read_titles]
+        counts['unseen_candidates'] = len(candidates)
         if not config.journals.get('enabled') or config.journals.get('mode') != 'easyscholar' or not config.journals.easyscholar.get('api_key'):
             raise ValueError('live journal metrics unavailable')
+        stage = 'journal_metrics'
         candidates = _bounded(lambda: enrich_journal_metrics(copy.deepcopy(candidates), config.journals), deadline)
+        counts['if_eligible'] = len(candidates)
         candidates.sort(key=lambda p: p.publication_date or '', reverse=True)
         candidates = sample_candidates(candidates, min(20, len(candidates))) if candidates else []
         llm = copy.deepcopy(config.llm)
         llm.generation_kwargs.max_tokens = min(int(llm.generation_kwargs.get('max_tokens', 8192)), 8192)
-        llm.generation_kwargs.timeout = 180
+        with open_dict(llm.generation_kwargs):
+            llm.generation_kwargs.timeout = 180
         consecutive_failures = 0
         for offset in range(0, len(candidates), 5):
             if counts['prepared'] >= max_new or counts['stock_after'] >= 20 or time.monotonic() >= deadline:
                 break
             batch = candidates[offset:offset + 5]
             try:
+                stage = 'thought_review'
                 approved = _bounded(lambda: evaluate_batch(batch, client, llm.generation_kwargs.model, deadline), deadline)
-            except Exception:
+            except Exception as error:
                 counts['status'] = 'stock_unavailable'
+                counts['failure_stage'], counts['error_type'] = stage, type(error).__name__
                 consecutive_failures += 1
                 if consecutive_failures >= 2:
                     break
@@ -175,6 +187,7 @@ def curate(config, deadline=None, max_new=12):
                 if not journal or journal_counts[journal] >= 3:
                     continue
                 try:
+                    stage = 'complete_reading_card'
                     _bounded(lambda: paper.generate_tldr(client, llm), deadline)
                     if save_ready(paper, config, corpus):
                         counts['prepared'] += 1
@@ -182,8 +195,9 @@ def curate(config, deadline=None, max_new=12):
                         journal_counts[journal] += 1
                 except Exception:
                     continue
-    except Exception:
+    except Exception as error:
         counts['status'] = 'stock_unavailable'
+        counts['failure_stage'], counts['error_type'] = locals().get('stage', 'setup_or_library'), type(error).__name__
     if time.monotonic() >= deadline and counts['stock_after'] < 20:
         counts['status'] = 'stock_unavailable'
     counts['stock_target'] = 20

@@ -138,6 +138,13 @@ export async function checkpoint() {
   }
 }
 
+export async function verifyCheckpoint() {
+  const base = githubBase();
+  if (!base) return {verified: false, cards: 0};
+  const remote = await remoteInventory(base, Date.now() + 8000);
+  return {verified: Boolean(remote), cards: remote?.payload.files.length || 0};
+}
+
 export async function restore() {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '') || !process.env.GITHUB_TOKEN || !secret) return;
@@ -193,6 +200,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const mode = process.argv[2];
   if (mode === 'restore') await restore();
   else if (mode === 'checkpoint') await checkpoint();
+  else if (mode === 'verify-checkpoint') console.log(JSON.stringify(await verifyCheckpoint()));
   else if (mode === 'pack') {
     if (fs.existsSync(directory) && secret) {
       const names = fs.readdirSync(directory).filter(validName).sort((a, b) => fs.statSync(path.join(directory, b)).mtimeMs - fs.statSync(path.join(directory, a)).mtimeMs).slice(0, 30);

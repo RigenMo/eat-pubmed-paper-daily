@@ -410,13 +410,13 @@ class Executor:
             try:
                 corpus = self.fetch_zotero_corpus()
                 corpus = self.filter_corpus(corpus)
-                if len(corpus) == 0:
-                    raise ValueError("No eligible Zotero references with abstracts; check collection filters and library contents.")
             except Exception:
                 offline_cached = load_offline_ready(self.config) if verify_related else []
                 if not offline_cached:
                     raise
                 logger.warning("Library check unavailable; using only approved cognitive stock from the last 24 hours")
+            if not corpus and not offline_cached:
+                raise ValueError("No eligible Zotero references with abstracts; check collection filters and library contents.")
 
         cached = offline_cached or (load_ready(self.config, corpus) if verify_related else [])
         if exclude_sent:

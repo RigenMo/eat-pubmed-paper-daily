@@ -123,6 +123,7 @@ def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypat
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper()], [{'status': 'ok'}]))
     monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings: items)
     calls = []
+    OmegaConf.set_struct(config, True)
     def approve(items, *args):
         calls.append(len(items))
         for p in items:
