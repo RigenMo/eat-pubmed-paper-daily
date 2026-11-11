@@ -84,7 +84,7 @@ def test_inventory_failure_preserves_stock_and_rerun_skips_complete(tmp_path, mo
     p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
     assert save_ready(p, config, corpus)
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper(), paper(2)], [{'status': 'ok'}]))
-    def metrics(items, settings):
+    def metrics(items, settings, **kwargs):
         assert [item.title for item in items] == ['Public 2']
         return items
     monkeypatch.setattr(curation, 'enrich_journal_metrics', metrics)
@@ -101,7 +101,7 @@ def test_model_batch_does_not_require_zotero_match():
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     def create(**kwargs):
         assert 'unrelated Zotero paper' not in json.dumps(kwargs)
-        assert kwargs['timeout'] <= 180
+        assert kwargs['timeout'] <= 240
         return response
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     p = paper()
@@ -121,7 +121,7 @@ def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypat
                                filter_corpus=lambda items: items)
     monkeypatch.setattr(curation, 'Executor', lambda config: executor)
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper()], [{'status': 'ok'}]))
-    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings: items)
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings, **kwargs: items)
     calls = []
     OmegaConf.set_struct(config, True)
     def approve(items, *args):
@@ -148,7 +148,7 @@ def test_empty_discovery_is_not_an_outage_and_two_batch_failures_stop(tmp_path, 
     executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None), fetch_zotero_corpus=lambda: corpus,
                                filter_corpus=lambda items: items)
     monkeypatch.setattr(curation, 'Executor', lambda config: executor)
-    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings: items)
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings, **kwargs: items)
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([], [{'status': 'true_empty'}]))
     assert curation.curate(config)['status'] == 'no_verified_stock'
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper(i) for i in range(1, 21)], [{'status': 'success'}]))

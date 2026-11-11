@@ -61,7 +61,7 @@ def evaluate_batch(papers, client, model, deadline):
     if remaining <= 0:
         raise TimeoutError('curation deadline')
     material = [{'id': str(i), 'title': paper.title, 'abstract': paper.abstract} for i, paper in enumerate(papers)]
-    response = client.chat.completions.create(model=model, timeout=min(180, remaining), max_tokens=6000,
+    response = client.chat.completions.create(model=model, timeout=min(240, remaining), max_tokens=6000,
         response_format={'type': 'json_object'}, messages=[{'role': 'system', 'content': RUBRIC},
         {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}])
     items = json.loads(response.choices[0].message.content)['items']
@@ -155,8 +155,19 @@ def curate(config, deadline=None, max_new=12):
         counts['unseen_candidates'] = len(candidates)
         if not config.journals.get('enabled') or config.journals.get('mode') != 'easyscholar' or not config.journals.easyscholar.get('api_key'):
             raise ValueError('live journal metrics unavailable')
+        # Interleave the whole pool before the bounded journal lookups. Do not
+        # spend a validation run's entire budget checking hundreds of journals.
+        ordered, remaining = [], list(candidates)
+        while remaining:
+            group = sample_candidates(remaining, min(20, len(remaining)))
+            if not group:
+                break
+            ordered.extend(group)
+            chosen = {id(p) for p in group}
+            remaining = [p for p in remaining if id(p) not in chosen]
         stage = 'journal_metrics'
-        candidates = _bounded(lambda: enrich_journal_metrics(copy.deepcopy(candidates), config.journals), deadline)
+        candidate_target = min(32, max(4, max_new * 3))
+        candidates = _bounded(lambda: enrich_journal_metrics(copy.deepcopy(ordered), config.journals, max_retained=candidate_target), deadline)
         counts['if_eligible'] = len(candidates)
         leads = [p for p in candidates if p.source == 'openalex']
         confirmed = _bounded(lambda: verify_openalex(leads, today, deadline=deadline), deadline) if leads else []

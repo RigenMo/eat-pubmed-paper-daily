@@ -206,7 +206,7 @@ class EasyScholarClient:
         return metrics
 
 
-def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
+def enrich_journal_metrics(papers: list[Any], journal_config: Any, max_retained: int | None = None) -> list[Any]:
     """Enrich papers and, when enabled, apply the configured finite-JIF gate.
 
     ``papers`` deliberately stays duck-typed so this helper does not import the
@@ -237,7 +237,11 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
 
     retained: list[Any] = []
     enriched_count = 0
+    checked_count = 0
     for paper in papers:
+        if max_retained is not None and len(retained) >= max_retained:
+            break
+        checked_count += 1
         journal = getattr(paper, "journal", None)
         original_metrics = getattr(paper, "journal_metrics", None)
         static_metrics = dict(original_metrics) if isinstance(original_metrics, Mapping) else {}
@@ -262,6 +266,8 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any) -> list[Any]:
 
     logger.info(
         "EasyScholar metadata: enriched {} paper(s); IF filter excluded {} paper(s)",
-        enriched_count, len(papers) - len(retained),
+        enriched_count, checked_count - len(retained),
     )
+    if checked_count < len(papers):
+        logger.info("Deferred journal checks for {} additional candidates", len(papers) - checked_count)
     return retained
