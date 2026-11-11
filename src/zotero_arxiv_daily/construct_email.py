@@ -527,6 +527,39 @@ def _build_innovation_html(assessment: Any) -> str:
     return f'<tr><td style="padding:2px 16px 6px; line-height:1.5; overflow-wrap:anywhere; word-break:break-word;">{badges}{reason_html}</td></tr>'
 
 
+def _build_thought_html(card: Any, abstract: Any, url: Any) -> str:
+    """Render only evidence traceable to this paper's public abstract."""
+    if not isinstance(card, Mapping) or not card:
+        return ""
+    fields = (
+        ("原问题【摘要/作者主张】", "original_question"),
+        ("重新提问【推断】", "reframed_question"),
+        ("迁移动作【推断】", "transfer_action"),
+        ("待检验问题【假设】", "testable_question"),
+    )
+    rows = [_section_row(label, _render_paragraphs(card.get(key)) or _render_paragraphs("【未知】")) for label, key in fields[:2]]
+    quote = card.get("key_quote")
+    if isinstance(quote, str) and 8 <= len(quote) <= 200 and quote in _text_value(abstract):
+        evidence = _render_paragraphs(quote)
+        link = _safe_url(url)
+        if link:
+            evidence += f'<a href="{link}">摘要来源</a>'
+    else:
+        evidence = _render_paragraphs("【未知】未找到可核对的摘要原文。")
+    rows.append(_section_row("关键证据【摘要原文】", evidence))
+    rows.extend(_section_row(label, _render_paragraphs(card.get(key)) or _render_paragraphs("【未知】")) for label, key in fields[2:])
+    levels = {"high": "高", "medium": "中", "low": "低", "uncertain": "待判定"}
+    dimensions = []
+    for key, label in (("scientific_contribution", "科研贡献"), ("thought_inspiration", "思想启发"), ("resource_feasibility", "资源可行性")):
+        value = card.get(key)
+        dimensions.append(f"{label}：{levels.get(value, '待判定') if isinstance(value, str) else '待判定'}")
+    rows.append(_section_row("独立定性判断【推断】", _render_paragraphs("；".join(dimensions))))
+    for key, label in (("data_requirements", "数据需求"), ("conditions", "适用条件"), ("missing_evidence", "待查证据")):
+        if _text_value(card.get(key)).strip():
+            rows.append(_section_row(label + "【待查】", _render_paragraphs(card[key])))
+    return _section_row("可迁移思想卡", _render_paragraphs("仅据摘要；区分原文、作者主张、推断与未知。")) + "".join(rows)
+
+
 def get_block_html(
     title: str,
     authors: str,
@@ -548,6 +581,7 @@ def get_block_html(
     recommendation_matches: Any = None,
     show_missing_date: bool = False,
     innovation_assessment: Any = None,
+    thought_card: Any = None,
 ):
     """Build one valid table card; the positional legacy signature is kept."""
     journal_text = _text_value(journal).strip()
@@ -577,7 +611,7 @@ def get_block_html(
     )
 
     structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope)
-    report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
+    report_rows = _build_thought_html(thought_card, original_abstract if source == "pubmed" else None, pdf_url) + (structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope))
     # Keep the metric badges visible even when values are absent; ``未提供``
     # makes missing metadata explicit without inferring a year or category.
     metrics_row = _build_journal_metrics_html(journal_metrics)
@@ -699,6 +733,7 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
                 recommendation_matches=getattr(paper, "recommendation_matches", None),
                 show_missing_date=True,
                 innovation_assessment=getattr(paper, "innovation_assessment", None),
+                thought_card=getattr(paper, "thought_card", None),
             )
         )
 

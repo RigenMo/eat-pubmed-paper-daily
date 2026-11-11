@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - codex/cognitive-discovery-upgrade
+      - codex/complete-reading-system
 
   pull_request:
     branches:

@@ -354,3 +354,16 @@ def test_live_mode_requires_a_valid_current_jif_not_an_audited_old_value(monkeyp
 
     assert journal_metrics.enrich_journal_metrics([paper], config) == []
 
+
+def test_bounded_if_buffer_stops_lookups_after_enough_verified_candidates(monkeypatch):
+    calls = []
+    def lookup(self, journal):
+        calls.append(journal)
+        return {'jif': 12, 'metrics_provider': 'EasyScholar'}
+    monkeypatch.setattr(journal_metrics.EasyScholarClient, 'lookup', lookup)
+    config = _journal_config()
+    config['mode'] = 'easyscholar'
+    papers = [_paper('Journal ' + str(i)) for i in range(100)]
+    kept = journal_metrics.enrich_journal_metrics(papers, config, max_retained=4)
+    assert kept == papers[:4]
+    assert len(calls) == 4

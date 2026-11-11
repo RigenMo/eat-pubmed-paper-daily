@@ -15,7 +15,7 @@ from omegaconf import DictConfig
 
 from daily_delivery_guard import SHANGHAI, SafeRedirect, api_pages, load_delivery_receipt
 from zotero_arxiv_daily.executor import Executor, normalize_path_patterns
-from zotero_arxiv_daily.card_store import load_ready, save_ready
+from zotero_arxiv_daily.card_store import load_ready, load_offline_ready, save_ready
 from zotero_arxiv_daily.llm_client import FailoverClient
 from zotero_arxiv_daily.reranker import get_reranker_cls
 from zotero_arxiv_daily.construct_email import render_email
@@ -36,6 +36,16 @@ def pmid(url):
     if not match:
         raise ValueError('Invalid receipt PubMed URL')
     return match.group(1)
+
+
+def receipt_identifier(paper):
+    try:
+        return pmid(paper['url'])
+    except ValueError:
+        keys = paper_keys(paper)
+        if not keys:
+            raise ValueError('Receipt paper has no stable identity')
+        return min(keys)
 
 
 def today_history(repository, token, current_run, now):
@@ -123,12 +133,15 @@ def supplement(config, progress=None):
     deadline = time.monotonic() + max(0, float(getattr(config, "recommendations", {}).get("generation_budget_seconds", 1200)))
     receipts, job_ids, attempts = today_history(repository, token, os.environ['GITHUB_RUN_ID'], now)
     delivered = {}
+    delivered_keys = set()
     for receipt in receipts:
         for paper in receipt['papers']:
-            identifier = pmid(paper['url'])
-            if identifier in delivered:
+            identifier = receipt_identifier(paper)
+            keys = paper_keys(paper)
+            if identifier in delivered or keys & delivered_keys:
                 raise RuntimeError('Duplicate delivered paper in receipts')
             delivered[identifier] = paper
+            delivered_keys.update(keys)
     if len(delivered) >= 10:
         write_summary(0, len(delivered), attempts)
         print(f'Supplement skipped: already delivered {len(delivered)}')
@@ -158,21 +171,27 @@ def supplement(config, progress=None):
             lightweight.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, 'ignore_path')
             corpus = lightweight.filter_corpus(lightweight.fetch_zotero_corpus())
             if corpus:
-                cached = filter_unseen(load_ready(config, corpus), seen)
+                cached = filter_unseen(load_ready(config, corpus), seen | getattr(lightweight, 'zotero_read_keys', set()))
+                cached = [p for p in cached if ' '.join((getattr(p, 'title', '') or '').casefold().split()) not in getattr(lightweight, 'zotero_read_titles', set())]
         except Exception:
-            cached = []
+            cached = filter_unseen(load_offline_ready(config), seen)
     selected = []
     if cached:
         # Receipts retain journal but not topic; retrieve delivered metadata to
         # preserve the same-day focus limit without constructing an Executor.
         try:
-            retriever = PubMedRetriever(config)
-            delivered_records = retriever._fetch_details(list(delivered))
-            delivered_papers = [retriever.convert_to_paper(record) for record in delivered_records]
-            by_id = {pmid(paper.url): paper for paper in delivered_papers if paper is not None}
-            if any(identifier not in by_id for identifier in delivered):
-                raise ValueError('Delivered topic metadata unavailable')
-            focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
+            if mode == 'balanced':
+                focus_count = 0
+            elif all(type(p.get('current_focus')) is bool for p in delivered.values()):
+                focus_count = sum(p['current_focus'] for p in delivered.values())
+            else:
+                retriever = PubMedRetriever(config)
+                delivered_records = retriever._fetch_details(list(delivered))
+                delivered_papers = [retriever.convert_to_paper(record) for record in delivered_records]
+                by_id = {pmid(paper.url): paper for paper in delivered_papers if paper is not None}
+                if any(identifier not in by_id for identifier in delivered):
+                    raise ValueError('Delivered topic metadata unavailable')
+                focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
             journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
             for paper in order_candidates(cached, mode):
                 journal = ' '.join((paper.journal or '').casefold().split())
@@ -188,23 +207,28 @@ def supplement(config, progress=None):
             selected = []
     saved_selected = list(selected)
     try:
-        if len(selected) < 10 - len(delivered):
-            candidates = [item for item in read_candidates(repository, token, job_ids) if item not in delivered]
+        candidates = [item for item in read_candidates(repository, token, job_ids) if item not in delivered] if len(selected) < 10 - len(delivered) else []
+        if len(selected) < 10 - len(delivered) and (candidates or not selected):
             if not candidates and not cached:
                 raise RuntimeError('No unsent previously read candidates')
             executor = Executor(config)
             if isinstance(executor.openai_client, FailoverClient):
                 executor.openai_client.deadline = deadline
             retriever = executor.retrievers['pubmed']
-            records = retriever._fetch_details(list(delivered) + candidates)
+            records = retriever._fetch_details([identifier for identifier in delivered if identifier.isdigit()] + candidates)
             papers = [retriever.convert_to_paper(record) for record in records]
             papers = [paper for paper in papers if paper is not None]
             by_id = {pmid(paper.url): paper for paper in papers}
-            if any(identifier not in by_id for identifier in delivered):
-                raise RuntimeError('Cannot establish topic of all delivered papers')
             settings = config.recommendations
             mode = effective_focus_mode(settings)
-            focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
+            if mode == 'balanced':
+                focus_count = 0
+            elif all(type(p.get('current_focus')) is bool for p in delivered.values()):
+                focus_count = sum(p['current_focus'] for p in delivered.values())
+            else:
+                if any(identifier not in by_id for identifier in delivered):
+                    raise RuntimeError('Cannot establish topic of all delivered papers')
+                focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
             journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
             today = now.astimezone(SHANGHAI).date()
             start = today - timedelta(days=int(settings.get('publication_days', 90)))
@@ -302,6 +326,7 @@ def supplement(config, progress=None):
                    'quality_passed': True, 'day_expected_cards': 10, 'day_complete_cards': total,
                    'is_supplement': True,
                    'papers': [{'url': p.url, 'journal': p.journal, 'publication_date': p.publication_date,
+                               'current_focus': bool(focus_evidence(p, mode)),
                                'jif': (p.journal_metrics or {}).get('jif'),
                                'identity_keys': sorted(paper_keys(p))} for p in selected]}
         output = Path('outputs/delivery-receipt.json')

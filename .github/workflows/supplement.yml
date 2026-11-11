@@ -30,8 +30,17 @@ jobs:
         run: python3 scripts/daily_delivery_guard.py
 
       - name: Setup uv
+        id: uv
+        continue-on-error: true
         if: steps.guard.outputs.day_complete == 'false' && steps.guard.outputs.delivery_unknown == 'false'
         uses: astral-sh/setup-uv@v7
+
+      - name: Install uv if release download failed
+        if: steps.uv.outcome == 'failure'
+        timeout-minutes: 3
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/uv-bootstrap" uv
+          echo "$RUNNER_TEMP/uv-bootstrap/bin" >> "$GITHUB_PATH"
 
       - name: Prepare sent paper history
         if: steps.guard.outputs.day_complete == 'false' && steps.guard.outputs.delivery_unknown == 'false'
@@ -63,6 +72,10 @@ jobs:
           RECEIVER: ${{ secrets.RECEIVER }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_MODEL: ${{ vars.LLM_BACKUP_MODEL }}
+          CARD_CHECKPOINT_GITHUB: 'true'
           OPENAI_API_BASE: https://llm.goaichat.top/v1
           EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
           RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}

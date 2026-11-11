@@ -47,6 +47,10 @@ email:
   sender_password: ??? # The password of the sender account. Note that it's not necessarily the password for logging in the e-mail client, but the authentication code for SMTP service. Ask your email provider for this. Example: abcdefghijklmn
 
 llm:
+  secondary_api:
+    key: ${oc.env:LLM_BACKUP_API_KEY,}
+    base_url: ${oc.env:LLM_BACKUP_BASE_URL,}
+    model: ${oc.env:LLM_BACKUP_MODEL,}
   fallback_models: [kimi-k3, glm-5.3, deepseek-v4.1-flash, qwen3.8-max]
   fallback_total_timeout: 240
   fallback_model_timeout: 90

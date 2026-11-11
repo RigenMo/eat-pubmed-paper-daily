@@ -104,3 +104,28 @@ def test_partial_cached_main_survives_new_candidate_failure(config, monkeypatch,
     executor.generate_email_summary = fail
     monkeypatch.chdir(tmp_path)
     assert executor.run(send_mail=False) == 1
+
+
+def test_approved_cognitive_stock_survives_library_outage(config, monkeypatch, tmp_path):
+    from tests.test_curation import paper, thought
+    from tests.test_executor import _delivery_executor
+    config.recommendations.card_cache_enabled = True
+    config.recommendations.enabled = True
+    config.recommendations.exclude_sent = False
+    config.recommendations.max_papers = 2
+    config.recommendations.focus_mode = 'balanced'
+    config.executor.max_paper_num = 2
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    for number in (1, 2):
+        p = paper(number)
+        p._approval_basis, p.thought_card = 'cognitive_transfer', thought()
+        assert save_ready(p, config, [SimpleNamespace(title='library', abstract='material')])
+    executor = _delivery_executor(config, [])
+    executor._search_mode = 5
+    def unavailable(*args, **kwargs):
+        raise RuntimeError('library temporarily unavailable')
+    executor.fetch_zotero_corpus = unavailable
+    executor.retrievers = {'pubmed': SimpleNamespace(retrieve_papers=lambda: pytest.fail('stock must avoid retrieval'))}
+    executor.generate_email_summary = lambda *args: pytest.fail('stock must avoid LLM')
+    monkeypatch.chdir(tmp_path)
+    assert executor.run(send_mail=False) == 2

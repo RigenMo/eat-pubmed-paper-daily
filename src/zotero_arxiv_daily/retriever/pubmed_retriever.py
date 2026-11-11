@@ -626,6 +626,10 @@ class PubMedRetriever(BaseRetriever):
     def _fetch_details(self, pmids: list[str]) -> list[dict[str, Any]]:
         if not pmids:
             return []
+        if not hasattr(self, '_public_details_enabled'):
+            settings = self.config.get('recommendations', {})
+            self._public_details_enabled = bool(settings.get('enabled', False)) and bool(self.retriever_config.get('public_index_fallback', False))
+            self._public_detail_budget = 4
         all_records: list[dict[str, Any]] = []
         batch_size = 100
         for i in range(0, len(pmids), batch_size):

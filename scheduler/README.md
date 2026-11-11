@@ -1,0 +1,9 @@
+# Independent external watchdog
+
+This adapter is not deployed or enabled until a Cloudflare account and credentials are configured. Its Cloudflare cron runs at 00:20–06:50 Asia/Shanghai every 30 minutes (16:20–22:50 UTC). It checks GitHub queued and in-progress runs and only dispatches `keep-alive.yml` with `recover=true`; it never sends email or reads papers. The existing supervisor makes delivery and recovery decisions. GitHub Actions outages can still prevent execution. Other GitHub run states and races between the check and dispatch are handled by the existing supervisor's checks, not atomically by this adapter.
+
+To enable, provide GitHub repository Actions secrets `CF_API_TOKEN` (Cloudflare Workers edit permission restricted to the intended account), `CF_ACCOUNT_ID`, and `GH_WATCHDOG_TOKEN` (fine-grained GitHub token restricted to this repository, Actions read/write). Then manually run `Deploy external watchdog` on the intended branch. It deploys through Cloudflare's official action and binds `GH_ACTIONS_TOKEN` as a Worker secret; the source and configuration contain no token. Verify the deployment and Cron Trigger in Cloudflare and confirm a real supervisor run in GitHub. Provisioning, deployment, and verification have not been performed here.
+
+The Worker returns 404 for HTTP requests. GitHub failures stop that tick with a generic error; lists over 100 active runs fail closed. If the supervisor is disabled, the Worker requests enabling it and waits until the next tick to dispatch. The Worker may be briefly deployed before its secret is bound; without the secret it makes no GitHub requests.
+
+Cloudflare references: [GitHub Actions deployment](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/), [Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/), [secrets](https://developers.cloudflare.com/workers/configuration/secrets/).
