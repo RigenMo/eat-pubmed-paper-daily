@@ -21,24 +21,34 @@ def sender_priority_check():
             return last_result[0]
         last_checked[0] = time.monotonic()
         last_result[0] = True
+        check.reason = 'sender_status_unavailable'
         repository = os.environ.get('GITHUB_REPOSITORY', '')
         token = os.environ.get('GITHUB_TOKEN', '')
         if not repository or not token:
             return True
-        try:
-            for status in ('in_progress', 'queued'):
-                url = f'https://api.github.com/repos/{repository}/actions/runs?status={status}&per_page=100'
-                with urlopen(Request(url, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'}), timeout=3) as response:
-                    data = json.load(response)
-                runs = data['workflow_runs']
-                if data['total_count'] > len(runs):
-                    return True
-                if any(str(run.get('path', '')).split('@')[0] in ('.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml') for run in runs):
-                    return True
-            last_result[0] = False
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                for status in ('in_progress', 'queued'):
+                    url = f'https://api.github.com/repos/{repository}/actions/runs?status={status}&per_page=100'
+                    with urlopen(Request(url, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+                                                      'User-Agent': 'eat-paper-inventory', 'X-GitHub-Api-Version': '2022-11-28'}), timeout=5) as response:
+                        data = json.load(response)
+                    runs = data['workflow_runs']
+                    if not isinstance(runs, list) or type(data.get('total_count')) is not int or data['total_count'] > len(runs) or any(not isinstance(run.get('path'), str) for run in runs):
+                        raise ValueError('Sender list incomplete')
+                    if any(run['path'].split('@')[0] in ('.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml') for run in runs):
+                        check.reason = 'sender_active'
+                        return True
+                last_result[0] = False
+                check.reason = 'sender_idle'
+                break
+            except Exception as error:
+                if attempt:
+                    code = getattr(error, 'code', None)
+                    code = code if type(code) is int else 'unknown'
+                    print(f'Stock sender-state check unavailable: {type(error).__name__}, status={code}', flush=True)
         return last_result[0]
+    check.reason = 'sender_status_unavailable'
     return check
 
 
