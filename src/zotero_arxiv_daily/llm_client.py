@@ -9,6 +9,10 @@ import openai
 from loguru import logger
 
 
+class BackgroundWorkPaused(RuntimeError):
+    """Optional inventory work yielded to an active sender."""
+
+
 class FailoverClient:
     def __init__(self, client, models, total_timeout=240, model_timeout=90, cooldown=900, clock=time.monotonic, backup_client=None):
         self._client = client
@@ -23,6 +27,7 @@ class FailoverClient:
         self.backup_client = backup_client
         self.endpoint_failed_until = 0
         self.endpoint_error = None
+        self.priority_check = None
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     async def _async_create(self, attempt):
@@ -43,6 +48,8 @@ class FailoverClient:
                 raise openai.APITimeoutError(request=request) from None
 
     def create(self, **kwargs):
+        if self.priority_check is not None and self.priority_check():
+            raise BackgroundWorkPaused('Sender has priority over inventory generation')
         requested = kwargs.get("model")
         models = list(self.models)
         if requested and requested not in models:
@@ -71,6 +78,8 @@ class FailoverClient:
         last_error = None
         failed_attempts = 0
         for index, model in enumerate(available):
+            if self.priority_check is not None and self.priority_check():
+                raise BackgroundWorkPaused('Sender has priority over inventory generation')
             remaining = deadline - self.clock()
             if remaining <= 0:
                 break
@@ -121,6 +130,8 @@ class FailoverClient:
         raise TimeoutError("LLM request budget exhausted")
 
     def _backup_or_raise(self, kwargs, deadline, error):
+        if self.priority_check is not None and self.priority_check():
+            raise BackgroundWorkPaused('Sender has priority over inventory generation')
         remaining = deadline - self.clock()
         if self.backup_client is not None and remaining > 0:
             self.backup_client.deadline = self.deadline

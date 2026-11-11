@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -21,7 +22,9 @@ def test_encrypted_card_roundtrip_and_authentication(tmp_path):
     source.mkdir()
     name = 'a' * 64 + '.json'
     marker = 'PRIVATE_CARD_CONTENT'
-    (source / name).write_text(json.dumps({'card': marker}), encoding='utf-8')
+    stamp = '2026-11-10T01:00:00+00:00'
+    payload = {'card': marker, 'saved_at': stamp}
+    (source / name).write_text(json.dumps(payload), encoding='utf-8')
     bundle = tmp_path / 'card-inventory.enc'
     env = dict(os.environ, CARD_STORE_DIR=str(source), CARD_INVENTORY_FILE=str(bundle), CARD_CACHE_SECRET='test-key')
     assert run('pack', env).returncode == 0
@@ -30,7 +33,8 @@ def test_encrypted_card_roundtrip_and_authentication(tmp_path):
     target = tmp_path / 'target'
     env['CARD_STORE_DIR'] = str(target)
     assert run('unpack', env).returncode == 0
-    assert json.loads((target / name).read_text(encoding='utf-8')) == {'card': marker}
+    assert json.loads((target / name).read_text(encoding='utf-8')) == payload
+    assert abs((target / name).stat().st_mtime - datetime.fromisoformat(stamp).timestamp()) < 1
     shutil.rmtree(target)
     env['CARD_CACHE_SECRET'] = 'rotated-key'
     assert run('unpack', env).returncode == 0

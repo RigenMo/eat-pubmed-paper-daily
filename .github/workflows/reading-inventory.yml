@@ -2,18 +2,19 @@ name: Prepare reading inventory (no email)
 on:
   workflow_dispatch:
   push:
-    branches: [main, codex/complete-reading-system]
+    branches: [main, codex/continuous-inventory]
     paths:
       - .github/workflows/reading-inventory.yml
       - scripts/build_reading_inventory.py
       - src/zotero_arxiv_daily/curation.py
+      - scripts/inventory_replenishment.mjs
   schedule:
-    - cron: '15 6 * * *' # 14:15 Shanghai.
+    - cron: '7,27,47 * * * *' # Refill heartbeat; no model call when full/backing off.
     - cron: '15 12 * * *' # 20:15 Shanghai, before next morning.
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 concurrency:
   group: reading-inventory-producer
   cancel-in-progress: false
@@ -24,26 +25,18 @@ jobs:
     timeout-minutes: 65
     steps:
       - uses: actions/checkout@v6
-      - name: Protect morning senders
+      - name: Check continuous refill control
         id: gate
-        uses: actions/github-script@v8
-        with:
-          script: |
-            core.setOutput('run', 'false');
-            const validation = context.eventName === 'push' && context.ref !== 'refs/heads/main';
-            const hour = Number(new Intl.DateTimeFormat('en-GB', {timeZone: 'Asia/Shanghai', hour:'2-digit', hourCycle:'h23'}).format(new Date()));
-            core.setOutput('validation', String(validation));
-            if (!validation && (hour < 12 || hour >= 23)) return;
-            try {
-              const groups = await Promise.all(['in_progress','queued'].map(status =>
-                github.paginate(github.rest.actions.listWorkflowRunsForRepo, {...context.repo, status, per_page:100})));
-              if (groups.flat().some(r => ['.github/workflows/main.yml','.github/workflows/supplement.yml','.github/workflows/test.yml'].includes(r.path))) return;
-              core.setOutput('run', 'true');
-            } catch { core.info('Sender status unavailable; postpone optional stock preparation.'); }
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INVENTORY_REFILL_ENABLED: ${{ vars.INVENTORY_REFILL_ENABLED || 'true' }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+        run: node scripts/inventory_replenishment.mjs gate
+
       - name: Setup uv
         id: uv
         continue-on-error: true
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' || steps.gate.outputs.extension_due == 'true'
         uses: astral-sh/setup-uv@v7
 
       - name: Install uv if release download failed
@@ -59,7 +52,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/sent_paper_history.py prepare
       - name: Restore approved stock
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run == 'true' || steps.gate.outputs.extension_due == 'true'
         continue-on-error: true
         timeout-minutes: 2
         env:
@@ -121,18 +114,32 @@ jobs:
           path: outputs/inventory-summary.json
           if-no-files-found: ignore
           retention-days: 30
+      - name: Continue refill or persist backoff
+        if: always() && !cancelled() && steps.gate.outputs.run == 'true' && steps.gate.outputs.validation != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INVENTORY_REFILL_ENABLED: ${{ vars.INVENTORY_REFILL_ENABLED || 'true' }}
+        run: node scripts/inventory_replenishment.mjs complete
+
       - name: Check the evening reserve
-        if: github.event_name == 'schedule' && github.event.schedule == '15 12 * * *' && steps.gate.outputs.run == 'true'
+        if: github.event_name == 'schedule' && github.event.schedule == '15 12 * * *' && (steps.gate.outputs.reason == 'refill_due' || steps.gate.outputs.reason == 'backoff')
         run: |
           python3 - <<'PY'
           import json
           from pathlib import Path
           p = Path('outputs/inventory-summary.json')
-          if not p.exists() or json.loads(p.read_text(encoding='utf-8')).get('stock_after', 0) < 10:
+          if p.exists():
+              count = json.loads(p.read_text(encoding='utf-8')).get('stock_after', 0)
+          else:
+              state = json.loads(Path('.cache/inventory-replenishment.json').read_text(encoding='utf-8'))
+              count = state.get('stock_after') if state.get('stock_verified') and state.get('ledger_digest') == state.get('checked_ledger_digest') else None
+          if count is None or count < 10:
               raise SystemExit('Fewer than 10 approved unsent cards remain for the morning; inspect inventory-status. This is not a delivery receipt.')
           PY
       - name: Extend completed reading independently
-        if: always() && steps.gate.outputs.run == 'true' && steps.gate.outputs.validation != 'true'
+        if: always() && steps.gate.outputs.extension_due == 'true'
         continue-on-error: true
         timeout-minutes: 6
         env:

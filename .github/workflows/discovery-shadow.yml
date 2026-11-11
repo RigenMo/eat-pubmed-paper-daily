@@ -33,7 +33,7 @@ jobs:
             try {
               const states = await Promise.all(['in_progress', 'queued'].map(status =>
                 github.paginate(github.rest.actions.listWorkflowRunsForRepo, {...context.repo, status, per_page: 100})));
-              const busy = states.flat().some(r => ['.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml'].includes(r.path));
+              const busy = states.flat().some(r => ['.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml', '.github/workflows/reading-inventory.yml'].includes(r.path));
               core.setOutput('busy', String(busy));
             } catch (error) { core.info('Sender activity unavailable; skip optional discovery.'); }
       - uses: astral-sh/setup-uv@v7
