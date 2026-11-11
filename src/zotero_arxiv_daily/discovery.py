@@ -77,7 +77,20 @@ def sample_candidates(papers, limit=20):
                 progress = True
         if not progress:
             break
-    return selected
+    # Preserve weighted membership while interleaving order, so an early
+    # verification budget cannot consume only the first channel's candidates.
+    ordered, remaining = [], list(selected)
+    while remaining:
+        progress = False
+        for channel in CHANNELS:
+            index = next((i for i, paper in enumerate(remaining) if channel in (paper.discovery_channels or [])), None)
+            if index is not None:
+                ordered.append(remaining.pop(index))
+                progress = True
+        if not progress:
+            ordered.extend(remaining)
+            break
+    return ordered
 
 
 def _europe_channel(channel, query, size, today, days, get):

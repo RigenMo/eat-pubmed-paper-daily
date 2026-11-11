@@ -94,6 +94,8 @@ def test_shortfall_is_round_robin_not_hard_quota():
     selected = sample_candidates(pool, 10)
     assert sum('frontier' in p.discovery_channels for p in selected) == 5
     assert sum('cross_disciplinary' in p.discovery_channels for p in selected) == 5
+    assert selected[0].discovery_channels == ['frontier']
+    assert selected[1].discovery_channels == ['cross_disciplinary']
 
 
 def test_evaluation_rejects_invented_quotes_but_resource_does_not_downrank():
