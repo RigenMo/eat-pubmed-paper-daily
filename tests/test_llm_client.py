@@ -257,3 +257,12 @@ def test_request_budget_expiry_does_not_mark_untried_endpoint_down():
         client.create(model=MODELS[0], timeout=120)
     assert calls == [MODELS[0]]
     assert client.endpoint_failed_until == 0
+
+
+def test_optional_background_priority_never_calls_model():
+    from zotero_arxiv_daily.llm_client import BackgroundWorkPaused
+    client = client_with(lambda **kwargs: pytest.fail('sender priority must prevent model call'))
+    client.priority_check = lambda: True
+    with pytest.raises(BackgroundWorkPaused):
+        client.create(model=MODELS[0])
+    assert client.endpoint_failed_until == 0

@@ -197,3 +197,37 @@ def test_offline_cognitive_stock_requires_fresh_matching_config_and_valid_eviden
     altered['paper']['thought_card']['key_quote'] = 'fake quote not in the source'
     path.write_text(json.dumps(altered), encoding='utf-8')
     assert load_offline_ready(config) == []
+
+
+def test_curation_can_yield_before_starting_any_generation():
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
+    result = curation.curate(config, should_yield=lambda: True)
+    assert result['status'] == 'paused_for_sender'
+    assert result['stock_count_verified'] is False
+
+
+def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.card_store import policy_fingerprint
+    from zotero_arxiv_daily.paper_identity import paper_keys
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    control = tmp_path / 'control.json'
+    monkeypatch.setenv('INVENTORY_CONTROL_FILE', str(control))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    first, second = paper(1), paper(2)
+    control.write_text(json.dumps({'policy': policy_fingerprint(config, corpus),
+        'deferred': {key: (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat() for key in paper_keys(first)}}))
+    monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([first, second], [{'status': 'success'}]))
+    observed = []
+    def metrics(items, settings, **kwargs):
+        observed.extend(p.url for p in items)
+        return []
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', metrics)
+    curation.curate(config)
+    assert observed == [second.url]

@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - codex/complete-reading-system
+      - codex/continuous-inventory
 
   pull_request:
     branches:

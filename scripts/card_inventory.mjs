@@ -56,6 +56,8 @@ function install(payload) {
     const temporary = target + '.tmp';
     fs.writeFileSync(temporary, item.content, {mode: 0o600});
     fs.renameSync(temporary, target);
+    const stamp = savedAt(item);
+    if (stamp > 0) fs.utimesSync(target, stamp / 1000, stamp / 1000);
   }
 }
 
