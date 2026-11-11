@@ -117,6 +117,32 @@ def test_receipt_pmid_ignores_url_variations():
     assert module.pmid('https://www.ncbi.nlm.nih.gov/pubmed/123') == '123'
 
 
+def test_complete_mixed_source_day_is_not_resent(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    for key, value in {'GITHUB_TOKEN': 'test', 'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_RUN_ID': '1'}.items():
+        monkeypatch.setenv(key, value)
+    previous = receipt(9)
+    previous['papers'].append({'url': 'https://doi.org/10.1234/verified', 'journal': 'Other',
+                               'publication_date': '2026-11-01', 'jif': 12, 'current_focus': False})
+    monkeypatch.setattr(module, 'today_history', lambda *args: ([previous], [], 1))
+    monkeypatch.setattr(module, 'send_email', lambda *a, **k: pytest.fail('complete mixed-source day must not send'))
+    assert module.supplement(SimpleNamespace()) == 0
+
+
+def test_mixed_source_alias_duplicate_fails_closed(monkeypatch, tmp_path):
+    from zotero_arxiv_daily.paper_identity import paper_keys
+    monkeypatch.chdir(tmp_path)
+    for key, value in {'GITHUB_TOKEN': 'test', 'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_RUN_ID': '1'}.items():
+        monkeypatch.setenv(key, value)
+    previous = receipt(1)
+    doi = {'url': 'https://doi.org/10.1234/verified', 'journal': 'J', 'publication_date': '2026-11-01', 'jif': 12}
+    previous['papers'][0]['identity_keys'] = list(paper_keys(doi))
+    previous['papers'].append(doi)
+    monkeypatch.setattr(module, 'today_history', lambda *args: ([previous], [], 1))
+    with pytest.raises(RuntimeError, match='Duplicate'):
+        module.supplement(SimpleNamespace())
+
+
 
 
 @pytest.mark.parametrize('log,blocked', [

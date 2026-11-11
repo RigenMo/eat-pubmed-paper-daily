@@ -182,7 +182,7 @@ def _pubmed_channel(channel, query, size, today, days, get):
 def _openalex_channel(channel, size, today, days, get, key):
     url = 'https://api.openalex.org/works'
     headers = {'Authorization': 'Bearer ' + key} if key else {}
-    filters = f'from_publication_date:{(today - timedelta(days=days)).isoformat()},to_publication_date:{today.isoformat()}'
+    filters = f'from_publication_date:{(today - timedelta(days=days)).isoformat()},to_publication_date:{today.isoformat()},type:article,primary_location.source.type:journal'
     if channel == 'citations':
         response = get(url, params={'filter': 'pmid:' + SEEDS[0], 'per-page': 1}, headers=headers, timeout=6)
         response.raise_for_status()

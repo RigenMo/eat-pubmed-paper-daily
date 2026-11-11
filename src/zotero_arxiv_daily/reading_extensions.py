@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote, urlsplit
 
 import requests
+from .bibliographic_verification import doi_of, verified_openalex
 
 BASE = 'https://www.ebi.ac.uk/europepmc/webservices/rest'
 LICENSE = re.compile(r'https?://(?:www\.)?creativecommons\.org/(?:licenses/(?:by|by-sa|by-nd|by-nc|by-nc-sa|by-nc-nd)/[1-4]\.0|publicdomain/(?:zero|mark)/1\.0)/?(?=[\s"<>]|$)', re.I)
@@ -19,7 +20,7 @@ LICENSE = re.compile(r'https?://(?:www\.)?creativecommons\.org/(?:licenses/(?:by
 
 def _call(client, llm_params, prompt, material, timeout):
     response = client.chat.completions.create(
-        model=llm_params['model'], timeout=timeout, response_format={'type': 'json_object'},
+        model=llm_params['model'], timeout=timeout, max_tokens=6000, response_format={'type': 'json_object'},
         messages=[{'role': 'system', 'content': prompt},
                   {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}])
     return json.loads(response.choices[0].message.content)
@@ -28,6 +29,8 @@ def _call(client, llm_params, prompt, material, timeout):
 def _id(paper):
     url = getattr(paper, 'url', '') or ''
     parsed = urlsplit(url)
+    if verified_openalex(paper):
+        return 'doi:' + doi_of(paper)
     if parsed.scheme != 'https' or parsed.hostname != 'pubmed.ncbi.nlm.nih.gov':
         return ''
     match = re.fullmatch(r'/(\d+)/?', parsed.path)
@@ -35,7 +38,7 @@ def _id(paper):
 
 
 def _eligible(paper):
-    return (getattr(paper, 'source', '') == 'pubmed' and
+    return ((getattr(paper, 'source', '') == 'pubmed' or verified_openalex(paper)) and
             getattr(paper, 'reader_status', '') == 'success' and
             bool(getattr(paper, 'reading_card', None)) and
             bool(getattr(paper, 'abstract', None)) and bool(_id(paper)))
@@ -111,11 +114,14 @@ def _extend(papers, client, llm_params, session=None):
                 'supplement': '未读取，是否存在未知'}
         result.append(item)
         try:
+            identifier_query = ('DOI:' + item['id'][4:]) if item['id'].startswith('doi:') else ('EXT_ID:' + item['id'])
             search = _get(session, BASE + '/search', deadline, params={
-                'query': 'EXT_ID:' + item['id'] + ' AND SRC:MED',
+                'query': identifier_query + ' AND SRC:MED',
                 'format': 'json', 'resultType': 'core', 'pageSize': 2}).json()
             records = search['resultList']['result']
-            records = [r for r in records if str(r.get('pmid', '')) == item['id'] and r.get('isOpenAccess') == 'Y']
+            records = [r for r in records if r.get('isOpenAccess') == 'Y' and (
+                (item['id'].startswith('doi:') and str(r.get('doi', '')).casefold() == item['id'][4:]) or
+                (not item['id'].startswith('doi:') and str(r.get('pmid', '')) == item['id']))]
             if len(records) != 1 or not re.fullmatch(r'PMC\d+', records[0].get('pmcid', '')):
                 raise ValueError('OA PMCID unavailable')
             pmcid = records[0]['pmcid']
@@ -138,12 +144,12 @@ def _extend(papers, client, llm_params, session=None):
                         scope='仅提供的正文节选；图表、参考文献及补充材料未读取')
             prompt = ('只根据提供的正文节选输出 JSON: {"report": 字符串, "evidence": [{"quote": 原文逐字引用}]}。'
                       '区分事实、作者主张、推断与未知；不声称读过图表或补充材料。')
-            output = _call(client, llm_params, prompt, excerpt, min(60, _remaining(deadline)))
+            output = _call(client, llm_params, prompt, excerpt, min(120, _remaining(deadline)))
             evidence = output.get('evidence')
             text = '\n'.join(s['text'] for s in excerpt)
-            if not isinstance(output.get('report'), str) or not output['report'].strip() or not isinstance(evidence, list) or not evidence:
+            if not isinstance(output.get('report'), str) or not 1 <= len(output['report'].strip()) <= 12000 or not isinstance(evidence, list) or not evidence:
                 raise ValueError('invalid reading report')
-            if any(not isinstance(e, dict) or not isinstance(e.get('quote'), str) or len(e['quote']) < 8 or e['quote'] not in text for e in evidence):
+            if any(not isinstance(e, dict) or not isinstance(e.get('quote'), str) or not 8 <= len(e['quote']) <= 1000 or e['quote'] not in text for e in evidence):
                 raise ValueError('untraceable evidence')
             item.update(status='success', report=output['report'], evidence=evidence)
         except Exception as error:

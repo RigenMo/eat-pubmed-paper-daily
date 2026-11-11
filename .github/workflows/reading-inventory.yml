@@ -113,8 +113,26 @@ jobs:
           path: .cache/card-inventory.enc
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload aggregate stock status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventory-status
+          path: outputs/inventory-summary.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Check the evening reserve
+        if: github.event_name == 'schedule' && github.event.schedule == '15 12 * * *' && steps.gate.outputs.run == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('outputs/inventory-summary.json')
+          if not p.exists() or json.loads(p.read_text(encoding='utf-8')).get('stock_after', 0) < 10:
+              raise SystemExit('Fewer than 10 approved unsent cards remain for the morning; inspect inventory-status. This is not a delivery receipt.')
+          PY
       - name: Extend completed reading independently
-        if: steps.gate.outputs.run == 'true' && steps.gate.outputs.validation != 'true'
+        if: always() && steps.gate.outputs.run == 'true' && steps.gate.outputs.validation != 'true'
         continue-on-error: true
         timeout-minutes: 6
         env:

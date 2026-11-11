@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from .paper_identity import filter_unseen, paper_keys
 from .protocol import Paper
 from .reading_preferences import effective_focus_mode
+from .bibliographic_verification import verified_openalex
 
 FIELDS = ('source', 'title', 'authors', 'abstract', 'url', 'pdf_url', 'journal',
           'title_zh', 'abstract_zh', 'reading_card', 'material_scope', 'journal_metrics',
@@ -56,7 +57,7 @@ def _directory():
 
 
 def _valid(paper, today, config):
-    if paper.source != 'pubmed' or not paper.title or not paper.abstract or not paper.url or not paper.journal:
+    if (paper.source != 'pubmed' and not verified_openalex(paper)) or not paper.title or not paper.abstract or not paper.url or not paper.journal:
         return False
     if paper.material_scope != SCOPE or paper.reader_status != 'success':
         return False
@@ -101,7 +102,7 @@ def save_ready(paper, config, corpus):
         innovation = data.get('innovation_assessment') or {}
         data['innovation_assessment'] = {key: innovation[key] for key in ('type', 'reason', 'evidence', 'scope') if key in innovation}
         data['discovery_channels'] = [v for v in (paper.discovery_channels or []) if v in ('frontier', 'cross_disciplinary', 'citations', 'counterevidence')]
-        data['source_metadata'] = [{key: item[key] for key in ('provider', 'channel', 'pmid') if key in item and isinstance(item[key], str)} for item in (paper.source_metadata or []) if isinstance(item, dict)]
+        data['source_metadata'] = [{key: item[key] for key in ('provider', 'channel', 'pmid', 'url', 'doi', 'verification', 'journal', 'publication_date') if key in item and isinstance(item[key], str)} for item in (paper.source_metadata or []) if isinstance(item, dict)]
         if basis == 'cognitive_transfer':
             from .curation import THOUGHT_FIELDS
             data['thought_card'] = {key: paper.thought_card[key] for key in THOUGHT_FIELDS}

@@ -38,6 +38,16 @@ def pmid(url):
     return match.group(1)
 
 
+def receipt_identifier(paper):
+    try:
+        return pmid(paper['url'])
+    except ValueError:
+        keys = paper_keys(paper)
+        if not keys:
+            raise ValueError('Receipt paper has no stable identity')
+        return min(keys)
+
+
 def today_history(repository, token, current_run, now):
     today = now.astimezone(SHANGHAI).date()
     start = datetime.combine(today - timedelta(days=1), datetime.min.time(), SHANGHAI).astimezone(timezone.utc)
@@ -123,12 +133,15 @@ def supplement(config, progress=None):
     deadline = time.monotonic() + max(0, float(getattr(config, "recommendations", {}).get("generation_budget_seconds", 1200)))
     receipts, job_ids, attempts = today_history(repository, token, os.environ['GITHUB_RUN_ID'], now)
     delivered = {}
+    delivered_keys = set()
     for receipt in receipts:
         for paper in receipt['papers']:
-            identifier = pmid(paper['url'])
-            if identifier in delivered:
+            identifier = receipt_identifier(paper)
+            keys = paper_keys(paper)
+            if identifier in delivered or keys & delivered_keys:
                 raise RuntimeError('Duplicate delivered paper in receipts')
             delivered[identifier] = paper
+            delivered_keys.update(keys)
     if len(delivered) >= 10:
         write_summary(0, len(delivered), attempts)
         print(f'Supplement skipped: already delivered {len(delivered)}')
@@ -202,15 +215,20 @@ def supplement(config, progress=None):
             if isinstance(executor.openai_client, FailoverClient):
                 executor.openai_client.deadline = deadline
             retriever = executor.retrievers['pubmed']
-            records = retriever._fetch_details(list(delivered) + candidates)
+            records = retriever._fetch_details([identifier for identifier in delivered if identifier.isdigit()] + candidates)
             papers = [retriever.convert_to_paper(record) for record in records]
             papers = [paper for paper in papers if paper is not None]
             by_id = {pmid(paper.url): paper for paper in papers}
-            if any(identifier not in by_id for identifier in delivered):
-                raise RuntimeError('Cannot establish topic of all delivered papers')
             settings = config.recommendations
             mode = effective_focus_mode(settings)
-            focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
+            if mode == 'balanced':
+                focus_count = 0
+            elif all(type(p.get('current_focus')) is bool for p in delivered.values()):
+                focus_count = sum(p['current_focus'] for p in delivered.values())
+            else:
+                if any(identifier not in by_id for identifier in delivered):
+                    raise RuntimeError('Cannot establish topic of all delivered papers')
+                focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
             journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
             today = now.astimezone(SHANGHAI).date()
             start = today - timedelta(days=int(settings.get('publication_days', 90)))

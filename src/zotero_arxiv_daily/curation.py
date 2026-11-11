@@ -15,6 +15,7 @@ from .discovery import discover, sample_candidates
 from .executor import Executor
 from .journal_metrics import enrich_journal_metrics
 from .paper_identity import filter_unseen, load_history, paper_keys
+from .bibliographic_verification import verified_openalex, verify_openalex
 
 TEXT_FIELDS = ('original_question', 'reframed_question', 'transfer_action', 'testable_question',
                'data_requirements', 'conditions', 'missing_evidence')
@@ -150,13 +151,17 @@ def curate(config, deadline=None, max_new=12):
             raise RuntimeError('discovery unavailable')
         # Discovery promotes OpenAlex records only after independent PubMed verification.
         candidates = [p for p in filter_unseen(candidates, seen | stock_keys)
-                      if p.source == 'pubmed' and _title(p) not in read_titles]
+                      if p.source in ('pubmed', 'openalex') and _title(p) not in read_titles]
         counts['unseen_candidates'] = len(candidates)
         if not config.journals.get('enabled') or config.journals.get('mode') != 'easyscholar' or not config.journals.easyscholar.get('api_key'):
             raise ValueError('live journal metrics unavailable')
         stage = 'journal_metrics'
         candidates = _bounded(lambda: enrich_journal_metrics(copy.deepcopy(candidates), config.journals), deadline)
         counts['if_eligible'] = len(candidates)
+        leads = [p for p in candidates if p.source == 'openalex']
+        confirmed = _bounded(lambda: verify_openalex(leads, today, deadline=deadline), deadline) if leads else []
+        counts['crossref_verified'] = len(confirmed)
+        candidates = [p for p in candidates if p.source == 'pubmed'] + confirmed
         candidates.sort(key=lambda p: p.publication_date or '', reverse=True)
         candidates = sample_candidates(candidates, min(20, len(candidates))) if candidates else []
         llm = copy.deepcopy(config.llm)

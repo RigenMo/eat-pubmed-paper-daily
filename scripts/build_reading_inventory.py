@@ -18,7 +18,11 @@ def main(config: DictConfig):
     max_new = int(os.environ.get('INVENTORY_MAX_NEW_CARDS', '12'))
     if not 1 <= seconds <= 2700 or not 1 <= max_new <= 12:
         raise ValueError('Invalid inventory duration or card limit')
-    print(json.dumps(curate(config, deadline=time.monotonic() + seconds, max_new=max_new), ensure_ascii=False))
+    result = curate(config, deadline=time.monotonic() + seconds, max_new=max_new)
+    output = Path('outputs/inventory-summary.json')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == '__main__':
