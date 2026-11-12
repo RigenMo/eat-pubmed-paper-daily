@@ -95,9 +95,10 @@ def test_inventory_failure_preserves_stock_and_rerun_skips_complete(tmp_path, mo
     assert len(load_ready(config, corpus)) == 1
 
 
-def test_model_batch_does_not_require_zotero_match():
+@pytest.mark.parametrize('contribution,inspiration', [('high', 'high'), ('medium', 'high'), ('high', 'medium')])
+def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_match(contribution, inspiration):
     import time
-    item = dict(thought(), id='0')
+    item = dict(thought(), id='0', scientific_contribution=contribution, thought_inspiration=inspiration)
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     def create(**kwargs):
         assert 'unrelated Zotero paper' not in json.dumps(kwargs)
@@ -105,9 +106,14 @@ def test_model_batch_does_not_require_zotero_match():
         return response
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     p = paper()
-    assert curation.evaluate_batch([p], client, 'model', time.monotonic() + 60) == [p]
-    assert p._approval_basis == 'cognitive_transfer'
-    assert p.innovation_assessment['type'] == 'uncertain'
+    result = curation.evaluate_batch([p], client, 'model', time.monotonic() + 60)
+    if contribution == inspiration == 'high':
+        assert result == [p]
+        assert p._approval_basis == 'cognitive_transfer'
+        assert p.innovation_assessment['type'] == 'uncertain'
+    else:
+        assert result == []
+        assert p.thought_card is None
 
 
 def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypatch):

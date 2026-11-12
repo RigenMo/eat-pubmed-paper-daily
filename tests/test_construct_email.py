@@ -311,6 +311,13 @@ def test_render_email_always_shows_unverified_metric_badges_without_journal():
 
 def test_generated_report_is_rendered_once_with_program_material_scope():
     paper = make_sample_paper(full_text=None)
+    # Restored inventory may still contain the removed module's internal notes.
+    paper.thought_card = {
+        "original_question": "REMOVED_THOUGHT_CONTENT",
+        "transfer_action": "REMOVED_TRANSFER_CONTENT",
+        "scientific_contribution": "high",
+        "data_requirements": "REMOVED_RESOURCE_CONTENT",
+    }
     paper.abstract_zh = "这是程序生成的摘要译文。"
     paper.material_scope = "仅据摘要（正文与补充材料未提供）"
     paper.reading_card = {
@@ -333,6 +340,9 @@ def test_generated_report_is_rendered_once_with_program_material_scope():
     assert html.count(paper.reading_card["self_test"]) == 1
     assert html.count("一、原文摘要中文版") == 1
     assert html.count("二、精读卡") == 1
+    for hidden in ("可迁移思想卡", "独立定性判断", "REMOVED_THOUGHT_CONTENT",
+                   "REMOVED_TRANSFER_CONTENT", "REMOVED_RESOURCE_CONTENT"):
+        assert hidden not in html
     assert "仅据摘要（正文与补充材料未提供）" in html
     assert "<strong>TLDR" not in html
     assert "'objects_data'" not in html

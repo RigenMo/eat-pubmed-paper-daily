@@ -67,14 +67,14 @@ def test_weekly_requires_two_valid_literal_evidence_items():
     assert synthesize_week(papers[:1], client({'questions': [item]}), {'model': 'x'}) == []
 
 
-def test_thought_card_escape_and_trace():
+def test_legacy_thought_card_is_never_displayed():
     thought = {'original_question': '<script>alert(1)</script>', 'key_quote': 'literal evidence for paper 1',
                'transfer_action': '<img src=x onerror=alert(1)>', 'resource_feasibility': 'low'}
     html = get_block_html('Title', 'Author', '', '', 'https://pubmed.ncbi.nlm.nih.gov/1/',
                           source='pubmed', original_abstract=paper(1).abstract, thought_card=thought)
-    assert '<script>' not in html and '<img' not in html and '&lt;script&gt;' in html
-    assert html.index('可迁移思想卡') < html.index('摘要原文')
-    assert 'literal evidence for paper 1' in html
+    assert '<script>' not in html and '<img' not in html and '&lt;script&gt;' not in html
+    assert '可迁移思想卡' not in html and '独立定性判断' not in html
+    assert paper(1).abstract in html  # Original abstract fallback is unchanged.
     private = get_block_html('Title', 'A', '', '', 'https://example.org', source='zotero',
                              original_abstract=paper(1).abstract, thought_card=thought)
     assert 'literal evidence for paper 1' not in private.split('摘要原文')[0]
