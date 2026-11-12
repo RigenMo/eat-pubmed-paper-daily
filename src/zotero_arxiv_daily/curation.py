@@ -32,7 +32,27 @@ NHANES, mouse metagenomics and metabolomics may exist; variable availability, fo
 are unverified. Do not assume access, results or suitability. key_quote must be a literal 8-200
 character substring of this paper's abstract. Explain in Chinese, label original_question as 【摘要】
 or 【作者主张】, reframed_question and transfer_action as 【推断】, testable question as 【假设】, and data, conditions and missing evidence as
-【待核验】. Give specific actionable content, never claim priority or first discovery. Return all fields.'''
+【待核验】. These are internal screening notes, not extra email sections.
+The audience works in epidemiology and bioinformatics. Ask one central question: what scientific
+intuition drove this design, what specific knowledge or evidence gap would remain without it,
+and how can that reasoning change an epidemiological OR bioinformatic research question?
+Use original_question for the original uncertainty and design-grounded intuition, and
+reframed_question for the concrete gap and how the study addresses it. Reconstruct reasoning
+from the supplied evidence; do not invent the author's private motivation or claim historical
+priority. A new measurement capability counts only when it opens a specific scientific question.
+In transfer_action, map the original problem structure to a concrete epidemiological or
+bioinformatic question: identify the corresponding entities, assumption or comparison being
+changed, and what evidence would distinguish the proposed explanation from an alternative.
+In testable_question state a falsifiable implication; in conditions and missing_evidence state
+the bridge's assumptions and unresolved evidence. Missing from the abstract does not mean the
+authors did not perform a test. Do not force both target disciplines or invent available fields.
+An analogous sensor application, a disease/database/algorithm swap, shared terminology, or a
+generic promise of better prediction is insufficient. High thought_inspiration requires a
+specific, defensible transfer of scientific reasoning; high scientific_contribution requires a
+specific knowledge/evidence increment supported by the abstract. If either chain cannot be
+explained from available material, mark that dimension uncertain or low, rather than inventing
+a bridge. Resource feasibility remains independent and must not lower thought value.
+Return all fields.'''
 
 
 def validate_thought_card(card, abstract):
@@ -81,6 +101,10 @@ def evaluate_batch(papers, client, model, deadline):
     for i, paper in enumerate(papers):
         item = by_id.get(str(i), {})
         if str(i) in duplicates or not validate_thought_card(item, paper.abstract):
+            continue
+        # New cross-topic stock needs both a supported contribution and a strong
+        # reasoning bridge. Cache validation remains compatible with saved work.
+        if item['scientific_contribution'] != 'high' or item['thought_inspiration'] != 'high':
             continue
         paper.thought_card = {field: item[field] for field in THOUGHT_FIELDS}
         # Only resource names are confirmed in this system. No field-level
