@@ -83,7 +83,7 @@ def evaluate_batch(papers, client, model, deadline):
     if remaining <= 0:
         raise TimeoutError('curation deadline')
     material = [{'id': str(i), 'title': paper.title, 'abstract': paper.abstract} for i, paper in enumerate(papers)]
-    response = client.chat.completions.create(model=model, timeout=min(240, remaining), max_tokens=6000,
+    response = client.chat.completions.create(model=model, timeout=min(720, remaining), max_tokens=6000,
         response_format={'type': 'json_object'}, messages=[{'role': 'system', 'content': RUBRIC},
         {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}])
     items = json.loads(response.choices[0].message.content)['items']
@@ -141,7 +141,7 @@ def _title(paper):
     return ' '.join((paper.title or '').casefold().split())
 
 
-def curate(config, deadline=None, max_new=12, should_yield=None):
+def curate(config, deadline=None, max_new=12, should_yield=None, count_only=False):
     if not isinstance(max_new, int) or not 1 <= max_new <= 12:
         raise ValueError('max_new must be between 1 and 12')
     deadline = min(deadline, time.monotonic() + 2700) if deadline is not None else time.monotonic() + 2700
@@ -181,13 +181,26 @@ def curate(config, deadline=None, max_new=12, should_yield=None):
         seen.update(key for paper in all_corpus for key in paper_keys(paper))
         seen.update(getattr(executor, 'zotero_read_keys', set()))
         read_titles = {_title(p) for p in all_corpus if _title(p)} | getattr(executor, 'zotero_read_titles', set())
-        stock = [p for p in filter_unseen(load_ready(config, corpus), seen) if _title(p) not in read_titles]
+        stock = []
+        journal_counts = Counter()
+        stock_titles = set()
+        for paper in filter_unseen(load_ready(config, corpus), seen):
+            title = _title(paper)
+            journal = ' '.join((paper.journal or '').casefold().split())
+            if title in read_titles or title in stock_titles or not journal or journal_counts[journal] >= 3:
+                continue
+            stock.append(paper)
+            stock_titles.add(title)
+            journal_counts[journal] += 1
         counts['stock_before'] = counts['stock_after'] = len(stock)
+        counts['journal_distribution'] = dict(sorted(journal_counts.items()))
         counts['stock_count_verified'] = True
         if len(stock) >= 20:
             counts['target_met'] = True
             return counts
-        journal_counts = Counter(' '.join((p.journal or '').casefold().split()) for p in stock)
+        if count_only:
+            counts['status'] = 'stock_partial' if stock else 'no_verified_stock'
+            return counts
         stock_keys = set().union(*(paper_keys(p) for p in stock)) if stock else set()
         stage = 'discovery'
         priority()
@@ -226,9 +239,9 @@ def curate(config, deadline=None, max_new=12, should_yield=None):
         llm = copy.deepcopy(config.llm)
         llm.generation_kwargs.max_tokens = min(int(llm.generation_kwargs.get('max_tokens', 8192)), 8192)
         with open_dict(llm.generation_kwargs):
-            llm.generation_kwargs.timeout = 180
+            llm.generation_kwargs.timeout = 720
         consecutive_failures = 0
-        batch_size = min(3, max_new)
+        batch_size = 1
         for offset in range(0, len(candidates), batch_size):
             priority()
             if counts['prepared'] >= max_new or counts['stock_after'] >= 20 or time.monotonic() >= deadline:
@@ -266,6 +279,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None):
                         counts['prepared'] += 1
                         counts['stock_after'] += 1
                         journal_counts[journal] += 1
+                        counts['journal_distribution'][journal] = journal_counts[journal]
                     else:
                         defer(paper, 20)
                     priority()

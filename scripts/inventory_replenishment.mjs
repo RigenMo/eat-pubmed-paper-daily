@@ -174,7 +174,12 @@ export async function gate(request) {
   output({extension_due: process.env.GITHUB_EVENT_NAME === 'schedule' && process.env.EVENT_SCHEDULE === '15 12 * * *'});
   const old = await readState(request);
   const digest = await ledger(request);
-  const decision = decide(old.state, Date.now(), digest, false, process.env.INVENTORY_REFILL_ENABLED !== 'false');
+  let decision = decide(old.state, Date.now(), digest, false, process.env.INVENTORY_REFILL_ENABLED !== 'false');
+  // A deployed producer fix should be tried once without waiting for the old
+  // failure's cooldown; sender priority, user pause and full reserves still win.
+  if (process.env.GITHUB_EVENT_NAME === 'push' && decision.reason === 'backoff') {
+    decision = {run: true, reason: 'deployment_recheck'};
+  }
   fs.mkdirSync('.cache', {recursive: true});
   fs.writeFileSync(localState, JSON.stringify({...old.state, checked_ledger_digest: digest}));
   output({run: decision.run, reason: decision.reason});

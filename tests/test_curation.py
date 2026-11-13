@@ -117,6 +117,20 @@ def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_ma
         assert p.thought_card is None
 
 
+@pytest.mark.parametrize('remaining,expected_timeout', [(45, 45), (1000, 720)])
+def test_background_review_request_budget_stays_within_whole_deadline(monkeypatch, remaining, expected_timeout):
+    monkeypatch.setattr(curation.time, 'monotonic', lambda: 100)
+    item = dict(thought(), id='0', thought_inspiration='high')
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
+    observed = []
+    def create(**kwargs):
+        observed.append(kwargs['timeout'])
+        return response
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    assert len(curation.evaluate_batch([paper()], client, 'model', 100 + remaining)) == 1
+    assert observed == [expected_timeout]
+
+
 def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypatch):
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
     monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
@@ -142,6 +156,33 @@ def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypat
     assert curation.curate(config)['prepared'] == 0
     assert calls == [1]
     assert len(load_ready(config, corpus)) == 1
+
+
+def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper(i) for i in range(1, 4)], [{'status': 'ok'}]))
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings, **kwargs: items)
+    reviews, readers = [], []
+    def approve(items, *args):
+        reviews.append(len(items))
+        for p in items:
+            p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        return items
+    def read(paper, client, settings):
+        readers.append(settings.generation_kwargs.timeout)
+    monkeypatch.setattr(curation, 'evaluate_batch', approve)
+    monkeypatch.setattr(Paper, 'generate_tldr', read)
+    assert curation.curate(config, max_new=3)['prepared'] == 3
+    assert reviews == [1, 1, 1] and readers == [720, 720, 720]
+    assert config.llm.generation_kwargs.get('timeout') is None
 
 
 
@@ -212,6 +253,59 @@ def test_curation_can_yield_before_starting_any_generation():
     result = curation.curate(config, should_yield=lambda: True)
     assert result['status'] == 'paused_for_sender'
     assert result['stock_count_verified'] is False
+
+
+def test_count_only_revalidates_seen_duplicates_and_journal_cap_without_generation(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.paper_identity import record_sent
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
+    corpus = [paper(21)]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items, zotero_read_titles={'public 22'})
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    record_sent(tmp_path / 'history.json', [paper(20)], datetime.now(timezone.utc).date())
+    cached = [paper(i) for i in range(1, 25)]
+    for p in cached:
+        p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        if int(p.title.split()[-1]) <= 4:
+            p.journal = ' Shared   Journal '
+        if p.title == 'Public 24':
+            p.title = 'Public 23'  # Different identifier, same normalized title.
+        assert save_ready(p, config, corpus)
+    unexpected_calls = []
+    def unexpected(*args, **kwargs):
+        unexpected_calls.append(True)
+        raise AssertionError('count-only must not discover, review, or generate')
+    monkeypatch.setattr(curation, 'discover', unexpected)
+    monkeypatch.setattr(curation, 'evaluate_batch', unexpected)
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', unexpected)
+    monkeypatch.setattr(Paper, 'generate_tldr', unexpected)
+    result = curation.curate(config, count_only=True)
+    assert result['stock_before'] == result['stock_after'] == 19
+    assert result['stock_count_verified'] is True and result['target_met'] is False
+    assert result['status'] == 'stock_partial' and unexpected_calls == []
+    assert result['prepared'] == result['discovered'] == 0
+    assert max(result['journal_distribution'].values()) == 3
+    assert sum(result['journal_distribution'].values()) == 19
+    assert len(load_ready(config, corpus)) == 24  # Validation preserves completed cards.
+
+
+def test_count_only_accepts_twenty_independent_qualified_cards(tmp_path, monkeypatch):
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    for i in range(1, 21):
+        p = paper(i)
+        p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        assert save_ready(p, config, corpus)
+    result = curation.curate(config, count_only=True)
+    assert result['stock_after'] == 20 and result['target_met'] is True
+    assert result['stock_count_verified'] is True and result['prepared'] == 0
 
 
 def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_path, monkeypatch):

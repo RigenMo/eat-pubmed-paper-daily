@@ -72,19 +72,59 @@ def sender_priority_check():
     return check
 
 
+def finalize_restored_stock(summary_file, verification_file):
+    """Accept full stock only after independent cloud restore under the same inputs."""
+    summary = json.loads(summary_file.read_text(encoding='utf-8'))
+    try:
+        verified = json.loads(verification_file.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        verified = {}
+    matches = all(isinstance(summary.get(key), str) and summary[key] == verified.get(key)
+                  for key in ('policy', 'sent_ledger_digest'))
+    count = verified.get('stock_after')
+    accepted = (matches and verified.get('stock_count_verified') is True
+                and type(count) is int and 20 <= count <= 30 and verified.get('target_met') is True
+                and verified.get('status') == 'ok')
+    summary['stock_count_verified'] = summary['target_met'] = summary['durable_stock_verified'] = accepted
+    if accepted:
+        summary['stock_after'] = count
+        summary['journal_distribution'] = verified.get('journal_distribution', {})
+        summary['status'] = 'ok'
+    else:
+        summary['status'] = 'stock_unavailable'
+        summary['failure_stage'] = 'cloud_restore_verification'
+    summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(json.dumps({'durable_stock_verified': accepted,
+                      'restored_stock_after': count if type(count) is int else None}))
+    return summary
+
+
 @hydra.main(version_base=None, config_path='../config', config_name='default')
 def main(config: DictConfig):
     seconds = int(os.environ.get('INVENTORY_BUILD_SECONDS', '2700'))
     max_new = int(os.environ.get('INVENTORY_MAX_NEW_CARDS', '12'))
     if not 1 <= seconds <= 2700 or not 1 <= max_new <= 12:
         raise ValueError('Invalid inventory duration or card limit')
+    verify_only = os.environ.get('INVENTORY_VERIFY_ONLY') == 'true'
     priority = sender_priority_check() if os.environ.get('GITHUB_ACTIONS') == 'true' else None
-    result = curate(config, deadline=time.monotonic() + seconds, max_new=max_new, should_yield=priority)
-    output = Path('outputs/inventory-summary.json')
+    result = curate(config, deadline=time.monotonic() + seconds, max_new=max_new, should_yield=priority,
+                    count_only=verify_only)
+    if result['target_met'] and not verify_only:
+        # A local count must never let the controller record full before restore.
+        result['stock_count_verified'] = False
+        result['durable_stock_verified'] = False
+    output = Path(os.environ.get('INVENTORY_SUMMARY_FILE', 'outputs/inventory-summary.json'))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+    if os.environ.get('GITHUB_OUTPUT') and not verify_only:
+        with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as stream:
+            stream.write('target_met=' + str(result['target_met']).lower() + '\n')
     print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == '__main__':
-    main()
+    if os.environ.get('INVENTORY_FINALIZE_VERIFICATION') == 'true':
+        result = finalize_restored_stock(Path('outputs/inventory-summary.json'), Path('outputs/inventory-restored-summary.json'))
+        raise SystemExit(0 if result['durable_stock_verified'] else 1)
+    else:
+        main()
