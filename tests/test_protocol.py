@@ -297,6 +297,61 @@ def test_reader_malformed_first_json_does_not_trigger_card_repair(llm_params):
     assert paper.reading_card is None
 
 
+@pytest.mark.parametrize("case,expected_code", [
+    ("length", "truncated"), ("empty", "empty"),
+    ("invalid_json", "invalid_json"), ("missing_translation", "translation_missing"),
+    ("transport", "transport"),
+])
+def test_reader_failure_logs_fixed_codes_without_source_or_response(monkeypatch, llm_params, case, expected_code):
+    import json
+    from types import SimpleNamespace
+    from zotero_arxiv_daily import protocol
+
+    logs = []
+    monkeypatch.setattr(protocol.logger, "warning", lambda message, *args: logs.append(message.format(*args)))
+    secret = "sk-secret-response-token"
+    source = "PRIVATE_ABSTRACT_MUST_NOT_APPEAR_IN_LOGS"
+    content = secret
+    if case == "empty":
+        content = "   "
+    elif case == "missing_translation":
+        content = json.dumps({"reading_card": {"private_response": secret}})
+
+    def create(**kwargs):
+        if case == "transport":
+            raise TimeoutError(f"{secret}: {source}")
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content),
+            finish_reason="length" if case == "length" else "stop",
+        )])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    paper = make_sample_paper(abstract=source, full_text=None, url=f"https://example.org/?key={secret}")
+    paper.generate_tldr(client, llm_params)
+
+    assert paper.reader_status == "failed"
+    assert paper.abstract_zh is None and paper.reading_card is None
+    assert logs == [f"Failed to generate tldr: code={expected_code}, status=unknown"]
+    assert secret not in "\n".join(logs) and source not in "\n".join(logs)
+
+
+def test_partial_reader_repair_logs_categories_without_draft_or_translation(monkeypatch, llm_params):
+    from zotero_arxiv_daily import protocol
+
+    logs = []
+    monkeypatch.setattr(protocol.logger, "warning", lambda message, *args: logs.append(message.format(*args)))
+    client, calls = make_reader_retry_client(second_response="sk-secret-malformed-response")
+    paper = make_sample_paper(full_text=None)
+    paper.generate_tldr(client, llm_params)
+
+    assert len(calls) == 2 and paper.reader_status == "partial"
+    assert paper.abstract_zh == "首轮忠实摘要译文，不应被卡片修复替换。"
+    assert paper.reading_card is None
+    assert logs == ["Reader card repair required: code=invalid_locator, status=unknown",
+                    "Reader card repair failed: code=invalid_json, status=unknown"]
+    assert "sk-secret" not in "\n".join(logs) and paper.abstract_zh not in "\n".join(logs)
+
+
 def test_reader_numbers_explicit_abstract_headings_without_fake_paragraphs(llm_params):
     captured = {}
 
@@ -358,8 +413,9 @@ def test_reader_rejects_invalid_locations_overlength_or_answered_selftest(invali
     else:
         payload["reading_card"]["self_test"] = "什么条件成立？答案：所有条件。"
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         Paper._validate_reader_payload(payload, "仅据摘要", {"摘要段落1"})
+    assert error.value.code == {"locator": "invalid_locator", "length": "overlength", "self_test": "card_schema"}[invalid_field]
 
 
 # ---------------------------------------------------------------------------

@@ -3,10 +3,31 @@ from typing import Any, Optional, TypeVar
 from datetime import datetime
 import re
 import tiktoken
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from loguru import logger
 import json
 RawPaperItem = TypeVar('RawPaperItem')
+
+
+class ReaderValidationError(ValueError):
+    """Keep validation detail local; logs expose only the fixed error code."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def _reader_diagnostic(error: Exception) -> str:
+    if isinstance(error, ReaderValidationError):
+        code = error.code
+    elif isinstance(error, (OpenAIError, OSError)):
+        code = "transport"
+    else:
+        code = "unexpected"
+    status = getattr(error, "status_code", None)
+    status = status if type(status) is int else "unknown"
+    return f"code={code}, status={status}"
+
 
 _READER_SYSTEM_PROMPT = (
     "你是严谨的中文科研论文导读编辑。请生成结构化中文文献阅读卡，"
@@ -161,7 +182,7 @@ class Paper:
     def _reader_prompt(self, llm_params: dict) -> tuple[str, str, set[str]]:
         """Build the reader prompt without silently dropping the abstract."""
         if not self.abstract and not self.full_text:
-            raise ValueError("摘要与正文材料均未提供")
+            raise ReaderValidationError("missing_material", "摘要与正文材料均未提供")
 
         encoder = self._reader_encoder()
         max_input_tokens = max(1, int(llm_params.get("max_input_tokens", 4000)))
@@ -184,7 +205,7 @@ class Paper:
         required_text = "\n\n".join(sections + [supplement_notice, scope_reserve, _READER_INSTRUCTIONS])
         fixed_tokens = len(encoder.encode(_READER_SYSTEM_PROMPT + required_text)) + 64
         if fixed_tokens > max_input_tokens:
-            raise ValueError("输入预算不足以容纳完整摘要和精读要求；未截断摘要")
+            raise ReaderValidationError("input_budget", "输入预算不足以容纳完整摘要和精读要求；未截断摘要")
         remaining_tokens = max_input_tokens - fixed_tokens
 
         if self.full_text:
@@ -218,38 +239,38 @@ class Paper:
         if not self.abstract:
             scope = scope.replace("摘要与", "仅据").replace("仅据摘要", "无可用摘要") + "；摘要未提供"
             if not remaining_tokens:
-                raise ValueError("输入预算不足以纳入正文，且摘要未提供")
+                raise ReaderValidationError("input_budget", "输入预算不足以纳入正文，且摘要未提供")
 
         sections.extend([supplement_notice, f"【材料范围】{scope}", _READER_INSTRUCTIONS])
         prompt = "\n\n".join(sections)
         total_tokens = len(encoder.encode(prompt)) + len(encoder.encode(_READER_SYSTEM_PROMPT)) + 16
         if total_tokens > max_input_tokens:
-            raise ValueError("材料与精读要求超过输入预算；未截断摘要")
+            raise ReaderValidationError("input_budget", "材料与精读要求超过输入预算；未截断摘要")
         return prompt, scope, source_labels
 
     @staticmethod
     def _normalise_reader_list(value: Any, field: str, length: Optional[int] = None) -> list[str]:
         if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
-            raise ValueError(f"reading_card.{field} must be a non-empty string list")
+            raise ReaderValidationError("card_schema", f"reading_card.{field} must be a non-empty string list")
         values = [item.strip() for item in value]
         if length is not None and len(values) != length:
-            raise ValueError(f"reading_card.{field} must contain {length} items")
+            raise ReaderValidationError("card_schema", f"reading_card.{field} must contain {length} items")
         return values
 
     @staticmethod
     def _validate_reader_translation(payload: Any) -> str:
         if not isinstance(payload, dict):
-            raise ValueError("reader response must be a JSON object")
+            raise ReaderValidationError("card_schema", "reader response must be a JSON object")
         abstract_zh = payload.get("abstract_zh")
         if not isinstance(abstract_zh, str) or not abstract_zh.strip():
-            raise ValueError("abstract_zh is missing")
+            raise ReaderValidationError("translation_missing", "abstract_zh is missing")
         # Remove only program-generated metadata sometimes copied by the model.
         abstract_zh = re.sub(r"[\[【]摘要段落\d+[\]】]\s*", "", abstract_zh)
         abstract_zh = re.sub(r"(?m)^【材料范围】[^\n]*$", "", abstract_zh)
         abstract_zh = abstract_zh.replace("【补充材料】未提供；不能声称已核查补充材料。", "")
         abstract_zh = abstract_zh.replace("【摘要原文结束】", "").strip()
         if not abstract_zh:
-            raise ValueError("abstract_zh contains no translation")
+            raise ReaderValidationError("translation_missing", "abstract_zh contains no translation")
         return abstract_zh
 
     @classmethod
@@ -257,7 +278,7 @@ class Paper:
         cls, card: Any, expected_scope: str, source_labels: Optional[set[str]] = None
     ) -> dict[str, Any]:
         if not isinstance(card, dict):
-            raise ValueError("reading_card is missing")
+            raise ReaderValidationError("card_schema", "reading_card is missing")
 
         essence = cls._normalise_reader_list(card.get("essence"), "essence", 2)
         design = card.get("design")
@@ -270,34 +291,34 @@ class Paper:
         if not isinstance(design, dict) or any(
             not isinstance(design.get(key), str) or not design[key].strip() for key in design_keys
         ):
-            raise ValueError("reading_card.design must contain four non-empty fields")
+            raise ReaderValidationError("card_schema", "reading_card.design must contain four non-empty fields")
         design = {key: design[key].strip() for key in design_keys}
 
         evidence = card.get("evidence")
         if not isinstance(evidence, list) or len(evidence) > 2:
-            raise ValueError("reading_card.evidence must contain at most two items")
+            raise ReaderValidationError("card_schema", "reading_card.evidence must contain at most two items")
         clean_evidence = []
         for item in evidence:
             if not isinstance(item, dict):
-                raise ValueError("each evidence item must be an object")
+                raise ReaderValidationError("card_schema", "each evidence item must be an object")
             fields = {key: item.get(key) for key in ("claim", "comparison", "result", "locator")}
             if any(not isinstance(value, str) or not value.strip() for value in fields.values()):
-                raise ValueError("each evidence item needs claim, comparison, result, locator")
+                raise ReaderValidationError("card_schema", "each evidence item needs claim, comparison, result, locator")
             if source_labels is not None:
                 referenced = set(re.findall(r"(?:摘要|正文)段落\d+", fields["locator"]))
                 remainder = re.sub(r"(?:摘要|正文)段落\d+", "", fields["locator"])
                 if (not referenced or not referenced.issubset(source_labels)
                         or re.search(r"[^\s\[\]【】()（）、,，;；/与及和]", remainder)):
-                    raise ValueError("evidence locator does not match the provided source paragraphs")
+                    raise ReaderValidationError("invalid_locator", "evidence locator does not match the provided source paragraphs")
             clean_evidence.append({key: value.strip() for key, value in fields.items()})
 
         innovation = cls._normalise_reader_list(card.get("innovation"), "innovation", 2)
         criticism = cls._normalise_reader_list(card.get("criticism"), "criticism", 3)
         self_test = card.get("self_test")
         if not isinstance(self_test, str) or not self_test.strip():
-            raise ValueError("reading_card.self_test is missing")
+            raise ReaderValidationError("card_schema", "reading_card.self_test is missing")
         if len(re.findall(r"[?？]", self_test)) != 1 or not self_test.strip().endswith(("?", "？")):
-            raise ValueError("self_test must contain one final question without an answer")
+            raise ReaderValidationError("card_schema", "self_test must contain one final question without an answer")
 
         clean_card = {
             "material_scope": expected_scope,
@@ -310,7 +331,7 @@ class Paper:
         }
         card_text = cls._format_reading_card(clean_card)
         if len(card_text) > 800:
-            raise ValueError(f"reading_card exceeds 800 characters ({len(card_text)})")
+            raise ReaderValidationError("overlength", f"reading_card exceeds 800 characters ({len(card_text)})")
         return clean_card
 
     @classmethod
@@ -329,23 +350,23 @@ class Paper:
     def _parse_reader_response(response: Any) -> dict[str, Any]:
         choices = getattr(response, "choices", None)
         if not choices:
-            raise ValueError("LLM reader response has no choices")
+            raise ReaderValidationError("empty", "LLM reader response has no choices")
         choice = choices[0]
         if getattr(choice, "finish_reason", None) == "length":
-            raise ValueError("LLM reader response was truncated (finish_reason=length)")
+            raise ReaderValidationError("truncated", "LLM reader response was truncated (finish_reason=length)")
         message = getattr(choice, "message", None)
         content = getattr(message, "content", None)
         if not isinstance(content, str) or not content.strip():
-            raise ValueError("LLM reader response is empty")
+            raise ReaderValidationError("empty", "LLM reader response is empty")
         content = content.strip()
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
         try:
             payload = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ValueError("LLM reader response is not valid JSON") from exc
+            raise ReaderValidationError("invalid_json", "LLM reader response is not valid JSON") from exc
         if not isinstance(payload, dict):
-            raise ValueError("reader response must be a JSON object")
+            raise ReaderValidationError("card_schema", "reader response must be a JSON object")
         return payload
 
     @staticmethod
@@ -378,13 +399,13 @@ class Paper:
     @staticmethod
     def _repair_card_from_payload(payload: Any) -> Any:
         if not isinstance(payload, dict):
-            raise ValueError("repair response must be a JSON object")
+            raise ReaderValidationError("card_schema", "repair response must be a JSON object")
         if "reading_card" in payload:
             return payload["reading_card"]
         card_keys = {"essence", "design", "evidence", "innovation", "criticism", "self_test"}
         if card_keys.issubset(payload):
             return payload
-        raise ValueError("repair response is missing reading_card")
+        raise ReaderValidationError("card_schema", "repair response is missing reading_card")
 
     def _reader_repair_prompt(
         self,
@@ -435,7 +456,7 @@ class Paper:
             if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
                 repair_prompt = self._reader_repair_prompt(original_prompt, scope, None, validation_error)
             if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
-                raise ValueError("Card repair source exceeds the input budget; translation retained")
+                raise ReaderValidationError("input_budget", "Card repair source exceeds the input budget; translation retained")
             response = openai_client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": _READER_SYSTEM_PROMPT},
@@ -454,7 +475,7 @@ class Paper:
                     raise
                 draft_card = card
                 validation_error = error
-                logger.warning("Reader length repair: {}", error)
+                logger.warning("Reader length repair: {}", _reader_diagnostic(error))
 
     def _generate_tldr_with_llm(self, openai_client: OpenAI, llm_params: dict) -> dict[str, Any]:
         prompt, scope, source_labels = self._reader_prompt(llm_params)
@@ -480,6 +501,7 @@ class Paper:
         try:
             card = self._validate_reader_card(payload.get("reading_card"), scope, source_labels)
         except ValueError as validation_error:
+            logger.warning("Reader card repair required: {}", _reader_diagnostic(validation_error))
             try:
                 card = self._repair_reader_card(
                     openai_client,
@@ -491,9 +513,7 @@ class Paper:
                     validation_error,
                 )
             except Exception as repair_error:
-                logger.warning(
-                    f"Reader card repair failed for {self.url}: {self._reader_repair_reason(repair_error)}"
-                )
+                logger.warning("Reader card repair failed: {}", _reader_diagnostic(repair_error))
                 self.reader_status = "partial"
                 return {
                     "abstract_zh": abstract_zh,
@@ -577,7 +597,7 @@ class Paper:
                 self.tldr = self._format_reader_output(payload)
             return self.tldr
         except Exception as e:
-            logger.warning(f"Failed to generate tldr of {self.url}: {type(e).__name__} (status={getattr(e, 'status_code', None)})")
+            logger.warning("Failed to generate tldr: {}", _reader_diagnostic(e))
             self.reading_card = None
             if self.abstract_zh:
                 self.reader_status = "partial"

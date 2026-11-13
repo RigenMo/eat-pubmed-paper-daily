@@ -16,6 +16,7 @@ from .discovery import discover, sample_candidates
 from .executor import Executor
 from .journal_metrics import enrich_journal_metrics
 from .paper_identity import filter_unseen, load_history, paper_keys
+from .protocol import Paper
 from .bibliographic_verification import verified_openalex, verify_openalex
 from .llm_client import BackgroundWorkPaused
 
@@ -58,7 +59,7 @@ Return all fields.'''
 def validate_thought_card(card, abstract):
     if not isinstance(card, dict) or not isinstance(abstract, str):
         return False
-    if any(card.get(field) not in LEVELS for field in THOUGHT_FIELDS[:3]):
+    if any(not isinstance(card.get(field), str) or card[field] not in LEVELS for field in THOUGHT_FIELDS[:3]):
         return False
     if any(card[field] not in {'high', 'medium'} for field in THOUGHT_FIELDS[:2]):
         return False
@@ -86,7 +87,7 @@ def evaluate_batch(papers, client, model, deadline):
     response = client.chat.completions.create(model=model, timeout=min(720, remaining), max_tokens=6000,
         response_format={'type': 'json_object'}, messages=[{'role': 'system', 'content': RUBRIC},
         {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}])
-    items = json.loads(response.choices[0].message.content)['items']
+    items = Paper._parse_reader_response(response).get('items')
     if not isinstance(items, list):
         raise ValueError('invalid batch')
     by_id = {}
@@ -247,6 +248,16 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
             if counts['prepared'] >= max_new or counts['stock_after'] >= 20 or time.monotonic() >= deadline:
                 break
             batch = candidates[offset:offset + batch_size]
+            eligible = []
+            for paper in batch:
+                journal = ' '.join((paper.journal or '').casefold().split())
+                if not journal or journal_counts[journal] >= 3:
+                    defer(paper, 120)
+                    continue
+                eligible.append(paper)
+            batch = eligible
+            if not batch:
+                continue
             try:
                 stage = 'thought_review'
                 approved = _bounded(lambda: evaluate_batch(batch, client, llm.generation_kwargs.model, deadline), deadline)
@@ -255,6 +266,8 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
             except Exception as error:
                 counts['status'] = 'stock_unavailable'
                 counts['failure_stage'], counts['error_type'] = stage, type(error).__name__
+                for paper in batch:
+                    defer(paper, 180)
                 consecutive_failures += 1
                 if consecutive_failures >= 2:
                     break
@@ -271,6 +284,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
                     break
                 journal = ' '.join((paper.journal or '').casefold().split())
                 if not journal or journal_counts[journal] >= 3:
+                    defer(paper, 120)
                     continue
                 try:
                     stage = 'complete_reading_card'
@@ -281,12 +295,12 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
                         journal_counts[journal] += 1
                         counts['journal_distribution'][journal] = journal_counts[journal]
                     else:
-                        defer(paper, 20)
+                        defer(paper, 180)
                     priority()
                 except BackgroundWorkPaused:
                     raise
                 except Exception:
-                    defer(paper, 20)
+                    defer(paper, 180)
                     continue
     except BackgroundWorkPaused:
         counts['status'] = 'paused_for_sender'
