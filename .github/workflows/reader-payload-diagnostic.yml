@@ -1,0 +1,76 @@
+name: Reader payload diagnostic (no email)
+on:
+  push:
+    branches: [codex/provider-diagnostic-20261113]
+    paths: [.github/workflows/reader-payload-diagnostic.yml]
+permissions:
+  contents: read
+concurrency:
+  group: reading-inventory-producer
+  cancel-in-progress: false
+jobs:
+  reader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Check real public-paper payload without exporting text
+        env:
+          PYTHONPATH: src
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+        run: |
+          uv run --no-project --with openai --with tiktoken --with loguru python - <<'PY'
+          import html, json, os, re, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from openai import OpenAI
+          from zotero_arxiv_daily.protocol import Paper, _READER_SYSTEM_PROMPT
+          query = urlencode({'query': 'EXT_ID:43017801 AND SRC:MED', 'format': 'json', 'resultType': 'core'})
+          with urlopen(Request('https://www.ebi.ac.uk/europepmc/webservices/rest/search?' + query,
+                               headers={'User-Agent': 'eat-paper-reader-diagnostic'}), timeout=30) as response:
+              record = json.load(response)['resultList']['result'][0]
+          abstract = html.unescape(re.sub('<[^>]+>', ' ', record.get('abstractText', ''))).strip()
+          assert abstract, 'Public abstract unavailable'
+          paper = Paper(source='pubmed', title=record['title'], authors=[], abstract=abstract,
+                        url='https://pubmed.ncbi.nlm.nih.gov/43017801/')
+          prompt, scope, labels = paper._reader_prompt({'max_input_tokens': 1000000})
+          client = OpenAI(api_key=os.environ['OPENAI_API_KEY'], base_url='https://llm.goaichat.top/v1', max_retries=0)
+          def check(model, output_limit, json_mode):
+              start = time.monotonic()
+              row = {'model': model, 'output_limit': output_limit, 'json_mode': json_mode, 'valid_card': False}
+              try:
+                  kwargs = {'model': model, 'max_tokens': output_limit, 'timeout': 180,
+                            'messages': [{'role': 'system', 'content': _READER_SYSTEM_PROMPT}, {'role': 'user', 'content': prompt}]}
+                  if json_mode:
+                      kwargs['response_format'] = {'type': 'json_object'}
+                  response = client.chat.completions.create(**kwargs)
+                  choice = response.choices[0]
+                  finish = choice.finish_reason
+                  row['finish_reason'] = finish if finish in ('stop', 'length', 'content_filter', 'tool_calls', None) else 'other'
+                  row['content_characters'] = len(choice.message.content or '')
+                  details = getattr(response.usage, 'completion_tokens_details', None)
+                  row['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
+                  payload = paper._parse_reader_response(response)
+                  row['fields_present'] = {key: key in payload for key in ('abstract_zh', 'reading_card')}
+                  paper._validate_reader_payload(payload, scope, labels)
+                  row['valid_card'] = True
+              except Exception as error:
+                  row['error_type'] = type(error).__name__
+                  row['http_status'] = getattr(error, 'status_code', None)
+                  if isinstance(error, ValueError):
+                      message = str(error).lower()
+                      row['validation_code'] = ('truncated' if 'truncat' in message else 'empty' if 'empty' in message
+                          else 'invalid_json' if 'json' in message else 'translation_missing' if 'abstract_zh' in message
+                          else 'invalid_locator' if 'locator' in message else 'overlength' if '800' in message else 'card_schema')
+              row['elapsed_seconds'] = round(time.monotonic() - start, 2)
+              print(json.dumps({'reader_diagnostic': row}), flush=True)
+              return row
+          first = check('kimi-k3', 8192, False)
+          second = check('qwen3.8-max', 8192, True)
+          if any(row.get('validation_code') == 'truncated' for row in (first, second)):
+              check('qwen3.8-max', 65536, True)
+          elif first.get('validation_code') in ('invalid_json', 'empty', 'translation_missing'):
+              check('kimi-k3', 8192, True)
+          print(json.dumps({'public_pmid': '43017801', 'private_library_accessed': False, 'mail_sent': False}))
+          PY
