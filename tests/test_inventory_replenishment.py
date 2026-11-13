@@ -253,6 +253,8 @@ assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=backoff'));
 fs.writeFileSync('out.txt',''); process.env.GITHUB_EVENT_NAME='push'; await gate(request);
 assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=deployment_recheck'));
 assert.equal(fs.readFileSync('out.txt','utf8').trim().split(String.fromCharCode(10)).filter(x=>x.startsWith('run=')).at(-1),'run=true');
+fs.writeFileSync('out.txt',''); process.env.GITHUB_EVENT_NAME='workflow_run'; await gate(request);
+assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=sender_completion_recheck'));
 console.log('ok');
 '''
     assert 'ok' in node(program, tmp_path)

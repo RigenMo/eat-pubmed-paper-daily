@@ -175,10 +175,11 @@ export async function gate(request) {
   const old = await readState(request);
   const digest = await ledger(request);
   let decision = decide(old.state, Date.now(), digest, false, process.env.INVENTORY_REFILL_ENABLED !== 'false');
-  // A deployed producer fix should be tried once without waiting for the old
+  // A deployment or a completed sender warrants a fresh count without the old
   // failure's cooldown; sender priority, user pause and full reserves still win.
-  if (process.env.GITHUB_EVENT_NAME === 'push' && decision.reason === 'backoff') {
-    decision = {run: true, reason: 'deployment_recheck'};
+  const event = process.env.GITHUB_EVENT_NAME;
+  if (['push', 'workflow_run'].includes(event) && decision.reason === 'backoff') {
+    decision = {run: true, reason: event === 'push' ? 'deployment_recheck' : 'sender_completion_recheck'};
   }
   fs.mkdirSync('.cache', {recursive: true});
   fs.writeFileSync(localState, JSON.stringify({...old.state, checked_ledger_digest: digest}));

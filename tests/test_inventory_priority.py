@@ -198,3 +198,16 @@ def test_workflow_verifies_cloud_restore_before_controller_can_accept_full():
         assert "steps.produce.outputs.target_met == 'true'" in step['if']
         assert not any('SMTP' in key for key in step.get('env', {}))
     assert 'outputs/inventory-restored-summary.json' in upload['with']['path']
+
+
+def test_delivery_completion_refill_uses_only_trusted_main_runs():
+    import yaml
+    workflow = yaml.safe_load((Path(__file__).parents[1] / '.github/workflows/reading-inventory.yml').read_text(encoding='utf-8'))
+    events = workflow.get('on', workflow.get(True))
+    assert events['workflow_run'] == {
+        'workflows': ['Send emails daily', 'Complete missing daily paper cards'], 'types': ['completed']}
+    condition = workflow['jobs']['build']['if']
+    assert "github.event_name != 'workflow_run'" in condition
+    assert 'github.event.workflow_run.head_repository.full_name == github.repository' in condition
+    assert "github.event.workflow_run.head_branch == 'main'" in condition
+    assert "github.event.workflow_run.conclusion != 'cancelled'" in condition
