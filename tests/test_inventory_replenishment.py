@@ -51,6 +51,26 @@ console.log('ok');
     assert 'ok' in node(program, tmp_path)
 
 
+def test_saved_net_growth_continues_after_one_failure_but_flat_counts_back_off(tmp_path):
+    program = '''
+import assert from 'node:assert/strict';
+const {advance}=await import(process.env.MODULE); const now=Date.now();
+const previous={stock_after:2,stock_verified:true,ledger_digest:'ledger',policy:'policy',no_progress:3};
+const summary={stock_after:3,stock_count_verified:true,sent_ledger_digest:'ledger',policy:'policy',prepared:1,status:'stock_unavailable'};
+const growing=advance(previous,summary,now,'ledger',1);
+assert.equal(growing.continue_now,true); assert.equal(growing.no_progress,0);
+assert.equal(Date.parse(growing.next_allowed_at),now);
+const flat=advance(growing,summary,now+1000,'ledger',2);
+assert.equal(flat.continue_now,false); assert.ok(Date.parse(flat.next_allowed_at)>now+1000);
+assert.equal(flat.no_progress,1);
+const changedPolicy=advance(previous,{...summary,stock_after:1,policy:'new-policy'},now,'ledger',3);
+assert.equal(changedPolicy.continue_now,true);
+const uncertain=advance(previous,{...summary,stock_count_verified:false},now,'ledger',4);
+assert.equal(uncertain.continue_now,false); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
 def test_completion_records_state_then_only_dispatches_inventory(tmp_path):
     program = '''
 import assert from 'node:assert/strict'; import fs from 'node:fs';
