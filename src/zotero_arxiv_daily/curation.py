@@ -314,7 +314,11 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         counts['status'] = 'stock_unavailable'
         counts['failure_stage'], counts['error_type'] = locals().get('stage', 'setup_or_library'), type(error).__name__
     if time.monotonic() >= deadline and counts['stock_after'] < 20:
-        counts['status'] = 'stock_unavailable'
+        counts['budget_exhausted'] = True
+        if counts['status'] != 'paused_for_sender':
+            # The round boundary is a checkpoint, not an endpoint failure. Saved
+            # progress can immediately continue in another bounded cloud run.
+            counts['status'] = 'stock_partial' if counts['prepared'] else 'stock_unavailable'
     counts['stock_target'] = 20
     counts['target_met'] = counts['stock_after'] >= 20
     if not counts['target_met'] and counts['status'] == 'ok':
