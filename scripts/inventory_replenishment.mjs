@@ -22,7 +22,11 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
   const ledgerChanged = typeof summary?.sent_ledger_digest === 'string' && summary.sent_ledger_digest !== ledgerDigest;
   const verified = summary?.stock_count_verified === true && summary.sent_ledger_digest === ledgerDigest && Number.isInteger(summary.stock_after) && summary.stock_after >= 0 && summary.stock_after <= 30;
   const stock = verified ? summary.stock_after : (previous?.stock_after ?? null);
-  const progress = Number.isInteger(summary?.prepared) && summary.prepared > 0;
+  const policy = typeof summary?.policy === 'string' ? summary.policy : previous?.policy;
+  const comparable = previous?.stock_verified === true && Number.isInteger(previous.stock_after) &&
+    previous.ledger_digest === ledgerDigest && previous.policy === policy;
+  const progress = verified && Number.isInteger(summary?.prepared) && summary.prepared > 0 &&
+    (!comparable || stock > previous.stock_after);
   const status = ledgerChanged ? 'sent_ledger_changed' : (summary?.status || 'interrupted');
   const full = verified && stock >= 20;
   let streak = previous?.no_progress || 0;
@@ -32,10 +36,9 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
   if (!full) {
     if (status === 'paused_for_sender') minutes = 5;
     else if (ledgerChanged) minutes = 0;
-    else if (status === 'stock_unavailable' || status === 'interrupted') minutes = progress ? 10 : Math.min(120, 20 * 2 ** (streak - 1));
+    else if (status === 'stock_unavailable' || status === 'interrupted') minutes = progress ? 0 : Math.min(120, 20 * 2 ** (streak - 1));
     else if (!progress) minutes = 60;
   }
-  const policy = typeof summary?.policy === 'string' ? summary.policy : previous?.policy;
   const deferred = {};
   const all = {...(previous?.policy === policy ? previous?.deferred : {}), ...summary?.deferred};
   for (const [key, stamp] of Object.entries(all).sort((a, b) => Date.parse(b[1]) - Date.parse(a[1])).slice(0, 1000)) {
