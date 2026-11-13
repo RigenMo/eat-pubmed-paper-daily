@@ -70,13 +70,18 @@ jobs:
               row['elapsed_seconds'] = round(time.monotonic() - start, 2)
               print(json.dumps({'reader_diagnostic': row}), flush=True)
               return row
-          chosen = None
-          for model in ['glm-5.3', 'kimi-k3', 'qwen3.8-max', 'deepseek-v4.1-flash']:
-              if check(model, 65536, True, 'low')['valid_card']:
-                  chosen = model
-                  break
-          if chosen is None:
-              raise SystemExit('No model produced a validated card in this diagnostic')
+          start = time.monotonic()
+          settings = {'max_input_tokens': 1000000, 'generation_kwargs': {'model': 'glm-5.3',
+              'max_tokens': 65536, 'timeout': 180, 'reasoning_effort': 'low'}}
+          payload = paper._generate_tldr_with_llm(client, settings)
+          valid = payload.get('reader_status') == 'success'
+          if valid:
+              paper._validate_reader_payload(payload, scope, labels)
+          print(json.dumps({'full_reader_pipeline': {'model': 'glm-5.3', 'valid_card': valid,
+              'reader_status': payload.get('reader_status'), 'elapsed_seconds': round(time.monotonic()-start,2)}}), flush=True)
+          if not valid:
+              raise SystemExit('Full public reader pipeline did not pass unchanged validation')
+          chosen = 'glm-5.3'
           start = time.monotonic()
           row = {'model': chosen, 'reasoning_effort': 'low', 'review_gate_passed': False}
           try:
