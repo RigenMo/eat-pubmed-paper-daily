@@ -50,6 +50,48 @@ def test_thought_evidence_and_resource():
     assert not curation.validate_thought_card(item, paper().abstract)
 
 
+@pytest.mark.parametrize('field', curation.THOUGHT_FIELDS[:3])
+@pytest.mark.parametrize('value', [['high'], {'level': 'high'}, None])
+def test_nested_review_ratings_are_rejected_without_type_error(field, value):
+    item = dict(thought(), **{field: value})
+    assert curation.validate_thought_card(item, paper().abstract) is False
+
+
+@pytest.mark.parametrize('response_kind', ['fenced', 'nested_rating', 'truncated', 'empty', 'non_object', 'invalid_items'])
+def test_reviewer_uses_strict_shared_parser_and_rejects_malformed_cards(response_kind):
+    import time
+    item = dict(thought(), id='0', thought_inspiration='high')
+    content = json.dumps({'items': [item]})
+    finish_reason = 'stop'
+    if response_kind == 'fenced':
+        content = '```json\n' + content + '\n```'
+    elif response_kind == 'nested_rating':
+        content = json.dumps({'items': [dict(item, scientific_contribution={'level': 'high'})]})
+    elif response_kind == 'truncated':
+        finish_reason = 'length'
+    elif response_kind == 'empty':
+        content = None
+    elif response_kind == 'non_object':
+        content = '[]'
+    elif response_kind == 'invalid_items':
+        content = '{"items": {}}'
+    response = SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish_reason, message=SimpleNamespace(content=content))])
+    calls = []
+    def create(**kwargs):
+        calls.append(True)
+        return response
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    p = paper()
+    if response_kind in ('fenced', 'nested_rating'):
+        result = curation.evaluate_batch([p], client, 'model', time.monotonic() + 60)
+        assert result == ([p] if response_kind == 'fenced' else [])
+    else:
+        with pytest.raises(ValueError):
+            curation.evaluate_batch([p], client, 'model', time.monotonic() + 60)
+        assert p.thought_card is None
+    assert calls == [True]
+
+
 def test_cache_revalidates_thought_and_keeps_public_provenance(tmp_path, monkeypatch):
     cache_dir = tmp_path / 'cards'
     monkeypatch.setenv('CARD_STORE_DIR', str(cache_dir))
@@ -124,11 +166,11 @@ def test_background_review_request_budget_stays_within_whole_deadline(monkeypatc
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     observed = []
     def create(**kwargs):
-        observed.append(kwargs['timeout'])
+        observed.append((kwargs['timeout'], kwargs['max_tokens']))
         return response
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     assert len(curation.evaluate_batch([paper()], client, 'model', 100 + remaining)) == 1
-    assert observed == [expected_timeout]
+    assert observed == [(expected_timeout, 65536)]
 
 
 def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypatch):
@@ -158,12 +200,16 @@ def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypat
     assert len(load_ready(config, corpus)) == 1
 
 
-def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize('configured_tokens,expected_tokens', [(10000, 10000), (65536, 65536),
+                                                            (100000, 65536), (None, 65536)])
+def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_path, monkeypatch, configured_tokens, expected_tokens):
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
     monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
     config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
         'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
-        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+        'llm': {'generation_kwargs': {'model': 'model'}}})
+    if configured_tokens is not None:
+        config.llm.generation_kwargs.max_tokens = configured_tokens
     corpus = [SimpleNamespace(title='unrelated', abstract='library')]
     executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None), fetch_zotero_corpus=lambda: corpus,
                                filter_corpus=lambda items: items)
@@ -177,12 +223,13 @@ def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_
             p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
         return items
     def read(paper, client, settings):
-        readers.append(settings.generation_kwargs.timeout)
+        readers.append((settings.generation_kwargs.timeout, settings.generation_kwargs.max_tokens))
     monkeypatch.setattr(curation, 'evaluate_batch', approve)
     monkeypatch.setattr(Paper, 'generate_tldr', read)
     assert curation.curate(config, max_new=3)['prepared'] == 3
-    assert reviews == [1, 1, 1] and readers == [720, 720, 720]
+    assert reviews == [1, 1, 1] and readers == [(720, expected_tokens)] * 3
     assert config.llm.generation_kwargs.get('timeout') is None
+    assert config.llm.generation_kwargs.get('max_tokens') == configured_tokens
 
 
 
@@ -333,3 +380,93 @@ def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_p
     monkeypatch.setattr(curation, 'enrich_journal_metrics', metrics)
     curation.curate(config)
     assert observed == [second.url]
+
+
+@pytest.mark.parametrize('failure_stage', ['review', 'reader', 'save'])
+def test_failed_identity_stays_deferred_through_round_and_max_backoff(tmp_path, monkeypatch, failure_stage):
+    from zotero_arxiv_daily.paper_identity import paper_keys
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    control = tmp_path / 'control.json'
+    monkeypatch.setenv('INVENTORY_CONTROL_FILE', str(control))
+    clock = [datetime.now(timezone.utc)]
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
+    monkeypatch.setattr(curation, 'datetime', Clock)
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([paper(1)], [{'status': 'ok'}]))
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings, **kwargs: items)
+    reviews, readers, saves = [], [], []
+    def approve(items, *args):
+        reviews.extend(p.url for p in items)
+        if failure_stage == 'review':
+            raise ValueError('invalid review')
+        for p in items:
+            p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        return items
+    def read(p, *args):
+        readers.append(p.url)
+        if failure_stage == 'reader':
+            raise ValueError('invalid card')
+    def save(p, *args):
+        saves.append(p.url)
+        return False
+    monkeypatch.setattr(curation, 'evaluate_batch', approve)
+    monkeypatch.setattr(Paper, 'generate_tldr', read)
+    monkeypatch.setattr(curation, 'save_ready', save)
+    result = curation.curate(config)
+    assert result['prepared'] == 0
+    for key in paper_keys(paper(1)):
+        assert datetime.fromisoformat(result['deferred'][key]) == clock[0] + timedelta(minutes=180)
+    control.write_text(json.dumps({'policy': result['policy'], 'deferred': result['deferred']}), encoding='utf-8')
+    # A whole 45-minute run followed by the largest 120-minute retry backoff.
+    clock[0] += timedelta(minutes=166)
+    before = (len(reviews), len(readers), len(saves))
+    second = curation.curate(config)
+    assert second['unseen_candidates'] == 0 and second['prepared'] == 0
+    assert (len(reviews), len(readers), len(saves)) == before
+
+
+def test_journal_reaching_cap_is_deferred_before_next_review_call(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.paper_identity import paper_keys
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(), fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    for i in (1, 2):
+        p = paper(i)
+        p.journal = 'Shared Journal'
+        p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        assert save_ready(p, config, corpus)
+    candidates = [paper(i) for i in (3, 4, 5)]
+    candidates[0].journal = candidates[1].journal = ' shared  JOURNAL '
+    monkeypatch.setattr(curation, 'discover', lambda **kwargs: (candidates, [{'status': 'ok'}]))
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, settings, **kwargs: items)
+    reviewed = []
+    def approve(items, *args):
+        reviewed.extend(p.url for p in items)
+        for p in items:
+            p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        return items
+    monkeypatch.setattr(curation, 'evaluate_batch', approve)
+    monkeypatch.setattr(Paper, 'generate_tldr', lambda *args: None)
+    before = datetime.now(timezone.utc)
+    result = curation.curate(config)
+    assert reviewed == [candidates[0].url, candidates[2].url]
+    assert result['prepared'] == 2 and result['journal_distribution']['shared journal'] == 3
+    for key in paper_keys(candidates[1]):
+        deferred_until = datetime.fromisoformat(result['deferred'][key])
+        assert before + timedelta(minutes=120) <= deferred_until <= datetime.now(timezone.utc) + timedelta(minutes=120)
