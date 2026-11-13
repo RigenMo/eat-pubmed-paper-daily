@@ -18,7 +18,7 @@ from .journal_metrics import enrich_journal_metrics
 from .paper_identity import filter_unseen, load_history, paper_keys
 from .protocol import Paper
 from .bibliographic_verification import verified_openalex, verify_openalex
-from .llm_client import BackgroundWorkPaused
+from .llm_client import BackgroundWorkPaused, FailoverClient
 
 TEXT_FIELDS = ('original_question', 'reframed_question', 'transfer_action', 'testable_question',
                'data_requirements', 'conditions', 'missing_evidence')
@@ -161,6 +161,11 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
             client.deadline = deadline
         if hasattr(client, 'priority_check'):
             client.priority_check = should_yield
+        if isinstance(client, FailoverClient):
+            # Qwen3.8 defaults to xhigh; low retains reasoning within a bounded
+            # budget. Other models and explicit per-request settings stay intact.
+            # https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
+            client.model_reasoning_efforts['qwen3.8-max'] = 'low'
         all_corpus = _bounded(executor.fetch_zotero_corpus, deadline)
         corpus = executor.filter_corpus(all_corpus)
         if not corpus:

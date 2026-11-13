@@ -11,7 +11,7 @@ concurrency:
 jobs:
   reader:
     runs-on: ubuntu-latest
-    timeout-minutes: 16
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
@@ -70,17 +70,24 @@ jobs:
               row['elapsed_seconds'] = round(time.monotonic() - start, 2)
               print(json.dumps({'reader_diagnostic': row}), flush=True)
               return row
-          check('qwen3.8-max', 65536, True, 'low')
+          chosen = None
+          for model in ['glm-5.3', 'kimi-k3', 'qwen3.8-max', 'deepseek-v4.1-flash']:
+              if check(model, 65536, True, 'low')['valid_card']:
+                  chosen = model
+                  break
+          if chosen is None:
+              raise SystemExit('No model produced a validated card in this diagnostic')
           start = time.monotonic()
-          row = {'model': 'qwen3.8-max', 'reasoning_effort': 'low', 'review_response_valid': False}
+          row = {'model': chosen, 'reasoning_effort': 'low', 'review_gate_passed': False}
           try:
-              response = client.chat.completions.create(model='qwen3.8-max', max_tokens=65536,
+              response = client.chat.completions.create(model=chosen, max_tokens=65536,
                   reasoning_effort='low', timeout=180, response_format={'type': 'json_object'},
                   messages=[{'role': 'system', 'content': RUBRIC}, {'role': 'user', 'content':
                       json.dumps([{'id': '0', 'title': paper.title, 'abstract': paper.abstract}])}])
               payload = paper._parse_reader_response(response)
               items = payload.get('items', [])
-              row['review_response_valid'] = bool(items and validate_thought_card(items[0], paper.abstract))
+              row['review_gate_passed'] = bool(items and validate_thought_card(items[0], paper.abstract)
+                  and items[0]['scientific_contribution'] == items[0]['thought_inspiration'] == 'high')
               details = getattr(response.usage, 'completion_tokens_details', None)
               row['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
               row['finish_reason'] = response.choices[0].finish_reason
