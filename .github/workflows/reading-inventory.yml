@@ -90,7 +90,7 @@ jobs:
           INVENTORY_MAX_NEW_CARDS: ${{ steps.gate.outputs.validation == 'true' && '1' || '12' }}
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=qwen3.8-max llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
       - name: Preserve stock after partial failure
         if: always()
         continue-on-error: true
@@ -141,7 +141,7 @@ jobs:
           RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
         run: |
           python3 scripts/sent_paper_history.py prepare
-          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=qwen3.8-max llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
       - name: Accept full stock only with independent restore proof
         if: always() && !cancelled() && steps.produce.outputs.target_met == 'true'
         timeout-minutes: 1

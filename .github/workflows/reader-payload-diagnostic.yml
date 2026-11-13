@@ -20,12 +20,13 @@ jobs:
           PYTHONPATH: src
           OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
         run: |
-          uv run --no-project --with openai --with tiktoken --with loguru python - <<'PY'
+          uv run python - <<'PY'
           import html, json, os, re, time
           from urllib.parse import urlencode
           from urllib.request import Request, urlopen
           from openai import OpenAI
           from zotero_arxiv_daily.protocol import Paper, _READER_SYSTEM_PROMPT
+          from zotero_arxiv_daily.curation import RUBRIC, validate_thought_card
           query = urlencode({'query': 'EXT_ID:43017801 AND SRC:MED', 'format': 'json', 'resultType': 'core'})
           with urlopen(Request('https://www.ebi.ac.uk/europepmc/webservices/rest/search?' + query,
                                headers={'User-Agent': 'eat-paper-reader-diagnostic'}), timeout=30) as response:
@@ -36,7 +37,7 @@ jobs:
                         url='https://pubmed.ncbi.nlm.nih.gov/43017801/')
           prompt, scope, labels = paper._reader_prompt({'max_input_tokens': 1000000})
           client = OpenAI(api_key=os.environ['OPENAI_API_KEY'], base_url='https://llm.goaichat.top/v1', max_retries=0)
-          def check(model, output_limit, json_mode):
+          def check(model, output_limit, json_mode, effort=None):
               start = time.monotonic()
               row = {'model': model, 'output_limit': output_limit, 'json_mode': json_mode, 'valid_card': False}
               try:
@@ -44,6 +45,9 @@ jobs:
                             'messages': [{'role': 'system', 'content': _READER_SYSTEM_PROMPT}, {'role': 'user', 'content': prompt}]}
                   if json_mode:
                       kwargs['response_format'] = {'type': 'json_object'}
+                  if effort:
+                      kwargs['reasoning_effort'] = effort
+                      row['reasoning_effort'] = effort
                   response = client.chat.completions.create(**kwargs)
                   choice = response.choices[0]
                   finish = choice.finish_reason
@@ -66,11 +70,23 @@ jobs:
               row['elapsed_seconds'] = round(time.monotonic() - start, 2)
               print(json.dumps({'reader_diagnostic': row}), flush=True)
               return row
-          first = check('kimi-k3', 8192, False)
-          second = check('qwen3.8-max', 8192, True)
-          if any(row.get('validation_code') == 'truncated' for row in (first, second)):
-              check('qwen3.8-max', 65536, True)
-          elif first.get('validation_code') in ('invalid_json', 'empty', 'translation_missing'):
-              check('kimi-k3', 8192, True)
+          check('qwen3.8-max', 65536, True, 'low')
+          start = time.monotonic()
+          row = {'model': 'qwen3.8-max', 'reasoning_effort': 'low', 'review_response_valid': False}
+          try:
+              response = client.chat.completions.create(model='qwen3.8-max', max_tokens=65536,
+                  reasoning_effort='low', timeout=180, response_format={'type': 'json_object'},
+                  messages=[{'role': 'system', 'content': RUBRIC}, {'role': 'user', 'content':
+                      json.dumps([{'id': '0', 'title': paper.title, 'abstract': paper.abstract}])}])
+              payload = paper._parse_reader_response(response)
+              items = payload.get('items', [])
+              row['review_response_valid'] = bool(items and validate_thought_card(items[0], paper.abstract))
+              details = getattr(response.usage, 'completion_tokens_details', None)
+              row['reasoning_tokens'] = getattr(details, 'reasoning_tokens', None)
+              row['finish_reason'] = response.choices[0].finish_reason
+          except Exception as error:
+              row.update(error_type=type(error).__name__, http_status=getattr(error, 'status_code', None))
+          row['elapsed_seconds'] = round(time.monotonic() - start, 2)
+          print(json.dumps({'effort_review_diagnostic': row}), flush=True)
           print(json.dumps({'public_pmid': '43017801', 'private_library_accessed': False, 'mail_sent': False}))
           PY
