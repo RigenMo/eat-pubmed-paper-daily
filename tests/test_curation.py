@@ -302,6 +302,20 @@ def test_curation_can_yield_before_starting_any_generation():
     assert result['stock_count_verified'] is False
 
 
+def test_only_background_qwen_gets_bounded_reasoning(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.llm_client import FailoverClient
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    client = FailoverClient(SimpleNamespace(), ['qwen3.8-max', 'kimi-k3'])
+    corpus = [SimpleNamespace(title='Anchor', abstract='Library material')]
+    executor = SimpleNamespace(openai_client=client, fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
+    assert curation.curate(config, count_only=True)['stock_after'] == 0
+    assert client.model_reasoning_efforts == {'qwen3.8-max': 'low'}
+
+
 def test_count_only_revalidates_seen_duplicates_and_journal_cap_without_generation(tmp_path, monkeypatch):
     from zotero_arxiv_daily.paper_identity import record_sent
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
