@@ -60,7 +60,7 @@ const request=async(method,path,body)=>{calls.push({method,path,body});
  if(path.includes('inventory-replenishment.json') && method==='GET') return null;
  if(path.includes('sent-paper-history.json')) return {sha:'blob',content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
  if(path.includes('git/ref/')) return {object:{sha:'main'}};
- if(path.includes('actions/runs?')) return {total_count:0,workflow_runs:[]};
+ if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};
  return {};
 };
 await complete(request);
@@ -135,12 +135,103 @@ process.env.GITHUB_EVENT_NAME='schedule'; process.env.EVENT_SCHEDULE='15 12 * * 
 process.env.GITHUB_OUTPUT='out.txt';
 const state={version:1,stock_verified:true,stock_after:20,ledger_digest:process.env.EMPTY_LEDGER_DIGEST,completed_at:new Date().toISOString(),next_allowed_at:new Date().toISOString()};
 const request=async(method,path)=>{
- if(path.includes('actions/runs?')) return {total_count:0,workflow_runs:[]};
+ if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};
  if(path.includes('sent-paper-history')) return {content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
  return {sha:'state',content:Buffer.from(JSON.stringify(state)).toString('base64')};
 };
 await gate(request); const out=fs.readFileSync('out.txt','utf8');
 assert.ok(out.includes('extension_due=true')); assert.ok(out.includes('reason=full'));
 assert.equal(out.trim().split(String.fromCharCode(10)).filter(x=>x.startsWith('run=')).at(-1),'run=false'); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
+def test_sender_queries_are_scoped_and_accept_busy_first_page(tmp_path):
+    program = '''
+import assert from 'node:assert/strict'; import fs from 'node:fs';
+const {gate}=await import(process.env.MODULE);
+process.env.GITHUB_REF='refs/heads/validation'; process.env.GITHUB_OUTPUT='out.txt';
+const calls=[];
+await gate(async(method,path)=>{calls.push(path); assert.equal(method,'GET');
+ assert.match(path,/^actions\\/workflows\\/(main|supplement|test)\\.yml\\/runs\\?status=(in_progress|queued)&per_page=1$/);
+ return {total_count:0,workflow_runs:[]};
+});
+assert.equal(calls.length,6); assert.ok(fs.readFileSync('out.txt','utf8').includes('run=true'));
+await gate(async()=>({total_count:257,workflow_runs:[{path:'.github/workflows/main.yml@main',status:'in_progress'}]}));
+assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=sender_has_priority')); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
+def test_contradictory_sender_results_fail_closed_with_safe_diagnostics(tmp_path):
+    program = '''
+import assert from 'node:assert/strict'; import fs from 'node:fs';
+const {gate,controlDiagnostic}=await import(process.env.MODULE);
+process.env.GITHUB_REF='refs/heads/validation'; process.env.GITHUB_OUTPUT='out.txt';
+for(const data of [null,{}, {total_count:1,workflow_runs:[]}, {total_count:0,workflow_runs:[{path:'.github/workflows/main.yml',status:'in_progress'}]},
+ {total_count:1,workflow_runs:[{path:'.github/workflows/unrelated.yml',status:'in_progress'}]},
+ {total_count:1,workflow_runs:[{path:'.github/workflows/main.yml',status:'completed'}]}]) {
+ await assert.rejects(()=>gate(async()=>data),error=>{
+  const diagnostic=JSON.parse(controlDiagnostic(error));
+  assert.equal(diagnostic.endpoint,'sender_status'); assert.equal(diagnostic.stage,'validate'); return true;
+ });
+}
+assert.ok(!fs.readFileSync('out.txt','utf8').includes('run=true')); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
+def test_control_get_retries_transient_failures_without_retrying_writes(tmp_path):
+    program = '''
+import assert from 'node:assert/strict';
+const {api,controlDiagnostic}=await import(process.env.MODULE);
+const endpoint='actions/workflows/main.yml/runs?status=in_progress&per_page=1';
+for(const failure of ['network','body_timeout',429,503]) {
+ let calls=0;
+ const request=api(async()=>{calls++;
+  if(calls===1) {if(failure==='network') throw new TypeError('https://secret.invalid/?token=test-token');
+   if(failure==='body_timeout') return {status:200,ok:true,json:async()=>{throw new DOMException('secret body','TimeoutError');}};
+   return {status:failure,ok:false};}
+  return {status:200,ok:true,json:async()=>({total_count:0,workflow_runs:[]})};
+ });
+ assert.equal((await request('GET',endpoint)).total_count,0); assert.equal(calls,2);
+}
+for(const method of ['GET','POST','PUT']) {
+ let calls=0;
+ const request=api(async()=>{calls++; throw new TypeError('https://secret.invalid/?token=test-token');});
+ await assert.rejects(()=>request(method,endpoint),error=>{
+  const diagnostic=controlDiagnostic(error); assert.ok(diagnostic.includes('sender_status'));
+  assert.ok(diagnostic.includes('network_or_timeout')); assert.ok(!diagnostic.includes('test-token')); assert.ok(!diagnostic.includes('secret.invalid')); return true;
+ });
+ assert.equal(calls,method==='GET'?2:1);
+}
+for(const method of ['POST','PUT']) {
+ let calls=0; const request=api(async()=>{calls++; return {status:503,ok:false};});
+ await assert.rejects(()=>request(method,endpoint)); assert.equal(calls,1);
+}
+let calls=0; const denied=api(async()=>{calls++;return {status:403,ok:false};});
+await assert.rejects(()=>denied('GET',endpoint)); assert.equal(calls,1); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
+def test_ledger_failure_diagnostic_is_distinct_from_sender_status(tmp_path):
+    program = '''
+import assert from 'node:assert/strict';
+const {gate,controlDiagnostic}=await import(process.env.MODULE);
+for(const [item,stage,reason] of [[null,'validate','ledger_unavailable'],
+ [{content:Buffer.from('secret malformed body').toString('base64')},'decode','invalid_ledger_json'],
+ [{content:Buffer.from(JSON.stringify({version:1,entries:[]})).toString('base64')},'validate','invalid_ledger']]) {
+ const request=async(method,path)=>{
+  if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};
+  if(path.includes('sent-paper-history')) return item;
+  return null;
+ };
+ await assert.rejects(()=>gate(request),error=>{
+  assert.deepEqual(JSON.parse(controlDiagnostic(error)),{endpoint:'sent_ledger',stage,reason,status:'unknown'});
+  return true;
+ });
+}
+console.log('ok');
 '''
     assert 'ok' in node(program, tmp_path)
