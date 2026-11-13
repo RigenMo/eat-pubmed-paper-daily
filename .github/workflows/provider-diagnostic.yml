@@ -63,6 +63,8 @@ jobs:
                       else:
                           choices = value.get('choices', [])
                           result['nonempty_content'] = bool(choices and choices[0].get('message', {}).get('content'))
+                          result['finish_reason'] = choices[0].get('finish_reason') if choices else None
+                          result['reasoning_present'] = bool(choices and choices[0].get('message', {}).get('reasoning_content'))
               except HTTPError as error:
                   result['http_status'] = error.code
               except Exception as error:
@@ -71,8 +73,13 @@ jobs:
               return result
           results.append(check('/models'))
           for model in models:
-              result = check('/chat/completions', {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}], 'max_tokens': 128, 'stream': False})
+              result = check('/chat/completions', {'model': model, 'messages': [{'role': 'user', 'content': 'Return JSON: {"ok":true}'}], 'max_tokens': 256, 'stream': False, 'response_format': {'type': 'json_object'}})
               result['model'] = model
+              result['mode'] = 'json'
+              results.append(result)
+          if not any(item.get('nonempty_content') for item in results):
+              result = check('/chat/completions', {'model': models[2], 'messages': [{'role': 'user', 'content': 'Reply with OK.'}], 'max_tokens': 256, 'stream': False})
+              result.update(model=models[2], mode='plain_comparison')
               results.append(result)
           print(json.dumps({'diagnostic_only': True, 'paper_content_sent': False, 'results': results}))
           PY
