@@ -302,6 +302,47 @@ def test_curation_can_yield_before_starting_any_generation():
     assert result['stock_count_verified'] is False
 
 
+def test_round_deadline_with_saved_progress_remains_eligible_for_auto_continuation(tmp_path, monkeypatch):
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    now = [0.0]
+    monkeypatch.setattr(curation.time, 'monotonic', lambda: now[0])
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 65536}}})
+    corpus = [SimpleNamespace(title='Library anchor', abstract='Library material')]
+    executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None),
+        fetch_zotero_corpus=lambda: corpus, filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    p = paper(61)
+    monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([p], [{'status': 'success'}]))
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, *a, **k: items)
+    def approve(items, *args):
+        items[0].thought_card, items[0]._approval_basis = thought(), 'cognitive_transfer'
+        return items
+    monkeypatch.setattr(curation, 'evaluate_batch', approve)
+    monkeypatch.setattr(p, 'generate_tldr', lambda *args: now.__setitem__(0, 60.0))
+    result = curation.curate(config, deadline=60.0)
+    assert result['prepared'] == result['stock_after'] == 1
+    assert result['stock_count_verified'] is True
+    assert result['budget_exhausted'] is True and result['status'] == 'stock_partial'
+    assert len(load_ready(config, corpus)) == 1
+
+
+def test_only_background_glm_gets_bounded_reasoning(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.llm_client import FailoverClient
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    client = FailoverClient(SimpleNamespace(), ['glm-5.3', 'kimi-k3'])
+    corpus = [SimpleNamespace(title='Anchor', abstract='Library material')]
+    executor = SimpleNamespace(openai_client=client, fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda config: executor)
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
+    assert curation.curate(config, count_only=True)['stock_after'] == 0
+    assert client.model_reasoning_efforts == {'glm-5.3': 'low'}
+
+
 def test_count_only_revalidates_seen_duplicates_and_journal_cap_without_generation(tmp_path, monkeypatch):
     from zotero_arxiv_daily.paper_identity import record_sent
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))

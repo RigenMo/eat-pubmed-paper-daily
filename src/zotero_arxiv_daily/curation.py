@@ -18,7 +18,7 @@ from .journal_metrics import enrich_journal_metrics
 from .paper_identity import filter_unseen, load_history, paper_keys
 from .protocol import Paper
 from .bibliographic_verification import verified_openalex, verify_openalex
-from .llm_client import BackgroundWorkPaused
+from .llm_client import BackgroundWorkPaused, FailoverClient
 
 TEXT_FIELDS = ('original_question', 'reframed_question', 'transfer_action', 'testable_question',
                'data_requirements', 'conditions', 'missing_evidence')
@@ -161,6 +161,11 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
             client.deadline = deadline
         if hasattr(client, 'priority_check'):
             client.priority_check = should_yield
+        if isinstance(client, FailoverClient):
+            # GLM5.3 defaults to max; low retains reasoning within a bounded
+            # budget. Other models and explicit per-request settings stay intact.
+            # https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
+            client.model_reasoning_efforts['glm-5.3'] = 'low'
         all_corpus = _bounded(executor.fetch_zotero_corpus, deadline)
         corpus = executor.filter_corpus(all_corpus)
         if not corpus:
@@ -309,7 +314,11 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         counts['status'] = 'stock_unavailable'
         counts['failure_stage'], counts['error_type'] = locals().get('stage', 'setup_or_library'), type(error).__name__
     if time.monotonic() >= deadline and counts['stock_after'] < 20:
-        counts['status'] = 'stock_unavailable'
+        counts['budget_exhausted'] = True
+        if counts['status'] != 'paused_for_sender':
+            # The round boundary is a checkpoint, not an endpoint failure. Saved
+            # progress can immediately continue in another bounded cloud run.
+            counts['status'] = 'stock_partial' if counts['prepared'] else 'stock_unavailable'
     counts['stock_target'] = 20
     counts['target_met'] = counts['stock_after'] >= 20
     if not counts['target_met'] and counts['status'] == 'ok':

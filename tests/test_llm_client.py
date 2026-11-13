@@ -266,3 +266,21 @@ def test_optional_background_priority_never_calls_model():
     with pytest.raises(BackgroundWorkPaused):
         client.create(model=MODELS[0])
     assert client.endpoint_failed_until == 0
+
+
+def test_model_effort_is_scoped_and_does_not_leak_into_fallback():
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        if kwargs['model'] == MODELS[3]:
+            raise error(503)
+        return 'ok'
+    client = client_with(create)
+    client.model_reasoning_efforts[MODELS[3]] = 'low'
+    assert client.create(model=MODELS[3]) == 'ok'
+    assert calls[0]['reasoning_effort'] == 'low'
+    assert calls[1]['model'] == MODELS[0] and 'reasoning_effort' not in calls[1]
+    other = client_with(lambda **kwargs: kwargs)
+    other.model_reasoning_efforts[MODELS[3]] = 'low'
+    assert other.create(model=MODELS[3], reasoning_effort='high')['reasoning_effort'] == 'high'
+    assert client_with(lambda **kwargs: kwargs).model_reasoning_efforts == {}

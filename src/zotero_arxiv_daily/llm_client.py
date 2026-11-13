@@ -28,6 +28,7 @@ class FailoverClient:
         self.endpoint_failed_until = 0
         self.endpoint_error = None
         self.priority_check = None
+        self.model_reasoning_efforts = {}
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     async def _async_create(self, attempt):
@@ -87,6 +88,8 @@ class FailoverClient:
             if model == self.preferred and model in healthy:
                 count = 1
             attempt = dict(kwargs, model=model, timeout=min(self.model_timeout, remaining / count))
+            if model in self.model_reasoning_efforts:
+                attempt.setdefault("reasoning_effort", self.model_reasoning_efforts[model])
             try:
                 if isinstance(self._client, openai.OpenAI):
                     result = asyncio.run(self._async_create(attempt))
