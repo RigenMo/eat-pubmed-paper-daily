@@ -51,7 +51,8 @@ def test_thought_evidence_and_resource():
 
 
 def test_cache_revalidates_thought_and_keeps_public_provenance(tmp_path, monkeypatch):
-    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path))
+    cache_dir = tmp_path / 'cards'
+    monkeypatch.setenv('CARD_STORE_DIR', str(cache_dir))
     config = OmegaConf.create({'recommendations': {'card_cache_enabled': True}})
     corpus = [SimpleNamespace(title='private', abstract='library')]
     p = paper()
@@ -59,7 +60,7 @@ def test_cache_revalidates_thought_and_keeps_public_provenance(tmp_path, monkeyp
     p.discovery_channels = ['cross_disciplinary']
     p.source_metadata = [{'provider': 'Europe PMC', 'channel': 'cross_disciplinary', 'pmid': '1', 'private': 'secret'}]
     assert save_ready(p, config, corpus)
-    stored = next(tmp_path.glob('*.json'))
+    stored = next(cache_dir.glob('*.json'))
     assert 'secret' not in stored.read_text(encoding='utf-8')
     loaded = load_ready(config, corpus)
     assert loaded[0].thought_card == thought()
@@ -172,7 +173,8 @@ def test_empty_discovery_is_not_an_outage_and_two_batch_failures_stop(tmp_path, 
 
 def test_offline_cognitive_stock_requires_fresh_matching_config_and_valid_evidence(tmp_path, monkeypatch):
     from zotero_arxiv_daily.card_store import load_offline_ready
-    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path))
+    cache_dir = tmp_path / 'cards'
+    monkeypatch.setenv('CARD_STORE_DIR', str(cache_dir))
     config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
         'zotero': {'user_id': '123', 'include_path': ['research/**'], 'ignore_path': None, 'api_key': 'secret'},
         'journals': {'enabled': True, 'mode': 'easyscholar', 'min_jif': 10}})
@@ -180,7 +182,7 @@ def test_offline_cognitive_stock_requires_fresh_matching_config_and_valid_eviden
     p = paper()
     p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
     assert save_ready(p, config, corpus)
-    path = next(tmp_path.glob('*.json'))
+    path = next(cache_dir.glob('*.json'))
     original = json.loads(path.read_text(encoding='utf-8'))
     assert 'secret' not in path.read_text(encoding='utf-8')
     assert load_offline_ready(config)[0]._cache_basis == 'approved_cognitive_stock_library_unavailable'
