@@ -162,10 +162,10 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         if hasattr(client, 'priority_check'):
             client.priority_check = should_yield
         if isinstance(client, FailoverClient):
-            # Qwen3.8 defaults to xhigh; low retains reasoning within a bounded
+            # GLM5.3 defaults to max; low retains reasoning within a bounded
             # budget. Other models and explicit per-request settings stay intact.
             # https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-openai-chat-completions
-            client.model_reasoning_efforts['qwen3.8-max'] = 'low'
+            client.model_reasoning_efforts['glm-5.3'] = 'low'
         all_corpus = _bounded(executor.fetch_zotero_corpus, deadline)
         corpus = executor.filter_corpus(all_corpus)
         if not corpus:
