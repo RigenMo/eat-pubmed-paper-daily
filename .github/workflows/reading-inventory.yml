@@ -70,6 +70,7 @@ jobs:
           node scripts/card_inventory.mjs checkpoint
           node scripts/card_inventory.mjs verify-checkpoint
       - name: Prepare approved cards without SMTP credentials
+        id: produce
         if: steps.gate.outputs.run == 'true'
         env:
           PYTHONPATH: src:.
@@ -89,7 +90,7 @@ jobs:
           INVENTORY_MAX_NEW_CARDS: ${{ steps.gate.outputs.validation == 'true' && '1' || '12' }}
         run: |
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
       - name: Preserve stock after partial failure
         if: always()
         continue-on-error: true
@@ -106,12 +107,56 @@ jobs:
           path: .cache/card-inventory.enc
           if-no-files-found: ignore
           retention-days: 7
+      - name: Restore cloud stock into a fresh directory
+        id: restore_stock
+        if: always() && !cancelled() && steps.produce.outputs.target_met == 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_CACHE_SECRET: ${{ secrets.GOAICHAT_API_KEY }}
+          CARD_STORE_DIR: .cache/reading-cards-verified
+        run: |
+          test ! -e "$CARD_STORE_DIR"
+          node scripts/card_inventory.mjs restore
+      - name: Validate restored stock under the production policy
+        if: always() && !cancelled() && steps.produce.outputs.target_met == 'true' && steps.restore_stock.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          PYTHONPATH: src:.
+          GITHUB_TOKEN: ${{ github.token }}
+          CARD_STORE_DIR: .cache/reading-cards-verified
+          INVENTORY_VERIFY_ONLY: 'true'
+          INVENTORY_SUMMARY_FILE: outputs/inventory-restored-summary.json
+          INVENTORY_BUILD_SECONDS: '240'
+          ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
+          ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+          EASYSCHOLAR_API_KEY: ${{ secrets.EASYSCHOLAR_API_KEY }}
+          OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_MODEL: ${{ vars.LLM_BACKUP_MODEL }}
+          RECOMMENDATION_FOCUS: ${{ vars.RECOMMENDATION_FOCUS || 'ukb_multimorbidity' }}
+        run: |
+          python3 scripts/sent_paper_history.py prepare
+          uv run python scripts/build_reading_inventory.py search.mode=5 source.mix_mode=1 executor.max_paper_num=10 executor.debug=false llm.api.key='${oc.env:OPENAI_API_KEY}' llm.api.base_url=https://llm.goaichat.top/v1 llm.generation_kwargs.model=kimi-k3 llm.generation_kwargs.max_tokens=65536 llm.max_input_tokens=1000000 llm.fallback_total_timeout=720 llm.fallback_model_timeout=180 recommendations.enabled=true recommendations.card_cache_enabled=true recommendations.exclude_sent=true recommendations.innovation_enabled=true recommendations.max_papers=10 recommendations.max_per_journal=3 recommendations.publication_days=90 recommendations.focus_mode='${oc.env:RECOMMENDATION_FOCUS}'
+      - name: Accept full stock only with independent restore proof
+        if: always() && !cancelled() && steps.produce.outputs.target_met == 'true'
+        timeout-minutes: 1
+        env:
+          PYTHONPATH: src:.
+          INVENTORY_FINALIZE_VERIFICATION: 'true'
+        run: uv run python scripts/build_reading_inventory.py
       - name: Upload aggregate stock status
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: inventory-status
-          path: outputs/inventory-summary.json
+          path: |
+            outputs/inventory-summary.json
+            outputs/inventory-restored-summary.json
           if-no-files-found: ignore
           retention-days: 30
       - name: Continue refill or persist backoff
@@ -131,7 +176,8 @@ jobs:
           from pathlib import Path
           p = Path('outputs/inventory-summary.json')
           if p.exists():
-              count = json.loads(p.read_text(encoding='utf-8')).get('stock_after', 0)
+              summary = json.loads(p.read_text(encoding='utf-8'))
+              count = summary.get('stock_after') if summary.get('stock_count_verified') else None
           else:
               state = json.loads(Path('.cache/inventory-replenishment.json').read_text(encoding='utf-8'))
               count = state.get('stock_after') if state.get('stock_verified') and state.get('ledger_digest') == state.get('checked_ledger_digest') else None

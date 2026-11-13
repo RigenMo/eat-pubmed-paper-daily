@@ -235,3 +235,24 @@ for(const [item,stage,reason] of [[null,'validate','ledger_unavailable'],
 console.log('ok');
 '''
     assert 'ok' in node(program, tmp_path)
+
+
+def test_deployed_fix_rechecks_once_without_disabling_scheduled_backoff(tmp_path):
+    program = '''
+import assert from 'node:assert/strict'; import fs from 'node:fs';
+const {gate}=await import(process.env.MODULE); process.env.GITHUB_OUTPUT='out.txt';
+const now=Date.now(); const state={version:1,stock_after:0,stock_verified:true,
+ completed_at:new Date(now).toISOString(),next_allowed_at:new Date(now+3600000).toISOString()};
+const request=async(method,path)=>{
+ if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};
+ if(path.includes('sent-paper-history')) return {content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
+ return {sha:'state',content:Buffer.from(JSON.stringify(state)).toString('base64')};
+};
+process.env.GITHUB_EVENT_NAME='schedule'; await gate(request);
+assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=backoff'));
+fs.writeFileSync('out.txt',''); process.env.GITHUB_EVENT_NAME='push'; await gate(request);
+assert.ok(fs.readFileSync('out.txt','utf8').includes('reason=deployment_recheck'));
+assert.equal(fs.readFileSync('out.txt','utf8').trim().split(String.fromCharCode(10)).filter(x=>x.startsWith('run=')).at(-1),'run=true');
+console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
