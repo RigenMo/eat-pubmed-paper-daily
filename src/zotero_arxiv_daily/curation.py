@@ -84,7 +84,7 @@ def evaluate_batch(papers, client, model, deadline):
     if remaining <= 0:
         raise TimeoutError('curation deadline')
     material = [{'id': str(i), 'title': paper.title, 'abstract': paper.abstract} for i, paper in enumerate(papers)]
-    response = client.chat.completions.create(model=model, timeout=min(720, remaining), max_tokens=6000,
+    response = client.chat.completions.create(model=model, timeout=min(720, remaining), max_tokens=65536,
         response_format={'type': 'json_object'}, messages=[{'role': 'system', 'content': RUBRIC},
         {'role': 'user', 'content': json.dumps(material, ensure_ascii=False)}])
     items = Paper._parse_reader_response(response).get('items')
@@ -238,7 +238,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         candidates.sort(key=lambda p: p.publication_date or '', reverse=True)
         candidates = sample_candidates(candidates, min(20, len(candidates))) if candidates else []
         llm = copy.deepcopy(config.llm)
-        llm.generation_kwargs.max_tokens = min(int(llm.generation_kwargs.get('max_tokens', 8192)), 8192)
+        llm.generation_kwargs.max_tokens = min(int(llm.generation_kwargs.get('max_tokens', 65536)), 65536)
         with open_dict(llm.generation_kwargs):
             llm.generation_kwargs.timeout = 720
         consecutive_failures = 0

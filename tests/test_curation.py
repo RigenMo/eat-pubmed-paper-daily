@@ -166,11 +166,11 @@ def test_background_review_request_budget_stays_within_whole_deadline(monkeypatc
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     observed = []
     def create(**kwargs):
-        observed.append(kwargs['timeout'])
+        observed.append((kwargs['timeout'], kwargs['max_tokens']))
         return response
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     assert len(curation.evaluate_batch([paper()], client, 'model', 100 + remaining)) == 1
-    assert observed == [expected_timeout]
+    assert observed == [(expected_timeout, 65536)]
 
 
 def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypatch):
@@ -200,12 +200,16 @@ def test_successful_preparation_is_saved_and_not_regenerated(tmp_path, monkeypat
     assert len(load_ready(config, corpus)) == 1
 
 
-def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize('configured_tokens,expected_tokens', [(10000, 10000), (65536, 65536),
+                                                            (100000, 65536), (None, 65536)])
+def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_path, monkeypatch, configured_tokens, expected_tokens):
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
     monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
     config = OmegaConf.create({'recommendations': {'card_cache_enabled': True},
         'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
-        'llm': {'generation_kwargs': {'model': 'model', 'max_tokens': 10000}}})
+        'llm': {'generation_kwargs': {'model': 'model'}}})
+    if configured_tokens is not None:
+        config.llm.generation_kwargs.max_tokens = configured_tokens
     corpus = [SimpleNamespace(title='unrelated', abstract='library')]
     executor = SimpleNamespace(openai_client=SimpleNamespace(deadline=None), fetch_zotero_corpus=lambda: corpus,
                                filter_corpus=lambda items: items)
@@ -219,12 +223,13 @@ def test_background_reviews_one_paper_at_a_time_and_preserves_reader_budget(tmp_
             p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
         return items
     def read(paper, client, settings):
-        readers.append(settings.generation_kwargs.timeout)
+        readers.append((settings.generation_kwargs.timeout, settings.generation_kwargs.max_tokens))
     monkeypatch.setattr(curation, 'evaluate_batch', approve)
     monkeypatch.setattr(Paper, 'generate_tldr', read)
     assert curation.curate(config, max_new=3)['prepared'] == 3
-    assert reviews == [1, 1, 1] and readers == [720, 720, 720]
+    assert reviews == [1, 1, 1] and readers == [(720, expected_tokens)] * 3
     assert config.llm.generation_kwargs.get('timeout') is None
+    assert config.llm.generation_kwargs.get('max_tokens') == configured_tokens
 
 
 

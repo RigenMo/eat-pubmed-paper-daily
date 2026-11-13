@@ -183,6 +183,23 @@ def test_reader_repairs_card_without_retranslating_abstract(llm_params):
     }
 
 
+@pytest.mark.parametrize("existing_format", [None, {"type": "text"}])
+def test_reader_initial_and_repair_use_json_mode_without_mutating_params(llm_params, existing_format):
+    import copy
+
+    if existing_format is not None:
+        llm_params["generation_kwargs"]["response_format"] = existing_format
+    original_params = copy.deepcopy(llm_params)
+    client, calls = make_reader_retry_client()
+    paper = make_sample_paper(full_text=None)
+
+    paper.generate_tldr(client, llm_params)
+
+    assert paper.reader_status == "success" and len(calls) == 2
+    assert all(call["response_format"] == {"type": "json_object"} for call in calls)
+    assert llm_params == original_params
+
+
 def test_reader_keeps_translation_when_card_repair_fails(llm_params):
     client, calls = make_reader_retry_client(second_response="not json")
     paper = make_sample_paper(full_text=None)

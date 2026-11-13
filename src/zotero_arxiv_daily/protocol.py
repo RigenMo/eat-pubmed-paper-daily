@@ -451,6 +451,8 @@ class Paper:
     ) -> dict[str, Any]:
         encoder = self._reader_encoder()
         max_input_tokens = max(1, int(llm_params.get("max_input_tokens", 4000)))
+        generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
+        generation_kwargs["response_format"] = {"type": "json_object"}
         for attempt in range(2):
             repair_prompt = self._reader_repair_prompt(original_prompt, scope, draft_card, validation_error)
             if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
@@ -462,7 +464,7 @@ class Paper:
                     {"role": "system", "content": _READER_SYSTEM_PROMPT},
                     {"role": "user", "content": repair_prompt},
                 ],
-                **llm_params.get("generation_kwargs", {}),
+                **generation_kwargs,
             )
             payload = self._parse_reader_response(response)
             card = self._repair_card_from_payload(payload)
@@ -479,6 +481,8 @@ class Paper:
 
     def _generate_tldr_with_llm(self, openai_client: OpenAI, llm_params: dict) -> dict[str, Any]:
         prompt, scope, source_labels = self._reader_prompt(llm_params)
+        generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
+        generation_kwargs["response_format"] = {"type": "json_object"}
         response = openai_client.chat.completions.create(
             messages=[
                 {
@@ -487,7 +491,7 @@ class Paper:
                 },
                 {"role": "user", "content": prompt},
             ],
-            **llm_params.get("generation_kwargs", {}),
+            **generation_kwargs,
         )
         payload = self._parse_reader_response(response)
         abstract_zh = self._validate_reader_translation(payload)
