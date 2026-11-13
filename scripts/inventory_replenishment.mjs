@@ -7,7 +7,7 @@ import {createHash} from 'node:crypto';
 const branch = 'codex/reading-card-checkpoints';
 const statePath = '.github/inventory-replenishment.json';
 const localState = '.cache/inventory-replenishment.json';
-const senderPath = /^\.github\/workflows\/(main|supplement|test)\.yml(?:@.*)?$/;
+const senderWorkflows = ['main.yml', 'supplement.yml', 'test.yml'];
 
 export function decide(state, now, ledgerDigest, busy = false, enabled = true) {
   if (!enabled) return {run: false, reason: 'paused_by_user'};
@@ -52,17 +52,48 @@ function output(fields) {
     Object.entries(fields).map(([key, value]) => key + '=' + String(value) + '\n').join(''));
 }
 
+function controlError(category, stage, reason, status = 'unknown') {
+  return Object.assign(new Error('Control ' + reason), {category, stage, reason, status});
+}
+
+export function controlDiagnostic(error) {
+  return JSON.stringify({endpoint: error.category || 'control', stage: error.stage || 'decision',
+    reason: error.reason || 'unavailable', status: Number.isInteger(error.status) ? error.status : 'unknown'});
+}
+
 export function api(fetcher = fetch) {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo || '') || !process.env.GITHUB_TOKEN) throw new Error('Control credentials unavailable');
   const base = 'https://api.github.com/repos/' + repo + '/';
   return async (method, endpoint, body) => {
-    const response = await fetcher(base + endpoint, {method, redirect: 'error',
-      headers: {Authorization: 'Bearer ' + process.env.GITHUB_TOKEN, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json'},
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000)});
-    if (response.status === 404 && method === 'GET') return null;
-    if (!response.ok) throw new Error('Control HTTP ' + response.status);
-    return response.status === 204 ? {} : response.json();
+    const category = endpoint.startsWith('actions/workflows/') ? (endpoint.includes('/runs?') ? 'sender_status' : 'inventory_dispatch') :
+      endpoint.includes('sent-paper-history.json') ? 'sent_ledger' : endpoint.includes('inventory-replenishment.json') ? 'refill_state' : 'git_reference';
+    const attempts = method === 'GET' ? 2 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let response;
+      try {
+        response = await fetcher(base + endpoint, {method, redirect: 'error',
+          headers: {Authorization: 'Bearer ' + process.env.GITHUB_TOKEN, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json'},
+          body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000)});
+      } catch (error) {
+        const transient = ['TypeError', 'TimeoutError', 'AbortError'].includes(error.name);
+        if (transient && attempt + 1 < attempts) continue;
+        throw controlError(category, 'request', transient ? 'network_or_timeout' : 'request_failed');
+      }
+      if (response.status === 404 && method === 'GET') return null;
+      if (!response.ok) {
+        if ((response.status === 429 || response.status >= 500) && attempt + 1 < attempts) continue;
+        const error = controlError(category, 'response', 'http_error', response.status);
+        error.message = 'Control HTTP ' + response.status;
+        throw error;
+      }
+      try { return response.status === 204 ? {} : await response.json(); }
+      catch (error) {
+        const transient = ['TypeError', 'TimeoutError', 'AbortError'].includes(error.name);
+        if (transient && attempt + 1 < attempts) continue;
+        throw controlError(category, 'decode', transient ? 'network_or_timeout' : 'invalid_json');
+      }
+    }
   };
 }
 
@@ -84,9 +115,11 @@ export async function readState(request) {
 
 async function ledger(request) {
   const item = await request('GET', 'contents/.github/sent-paper-history.json?ref=codex%2Fsent-paper-history');
-  if (!item || typeof item.content !== 'string') throw new Error('Sent ledger unavailable');
-  const value = JSON.parse(Buffer.from(item.content, 'base64').toString('utf8'));
-  if (value.version !== 1 || !value.entries || typeof value.entries !== 'object' || Array.isArray(value.entries)) throw new Error('Invalid sent ledger');
+  if (!item || typeof item.content !== 'string') throw controlError('sent_ledger', 'validate', 'ledger_unavailable');
+  let value;
+  try { value = JSON.parse(Buffer.from(item.content, 'base64').toString('utf8')); }
+  catch { throw controlError('sent_ledger', 'decode', 'invalid_ledger_json'); }
+  if (!value || value.version !== 1 || !value.entries || typeof value.entries !== 'object' || Array.isArray(value.entries)) throw controlError('sent_ledger', 'validate', 'invalid_ledger');
   // Reconciliation timestamps change even when nothing was sent. Only actual
   // sent identities/dates invalidate a counted reserve.
   const sorted = Object.entries(value.entries).sort(([a], [b]) => a.localeCompare(b));
@@ -95,10 +128,19 @@ async function ledger(request) {
 }
 
 async function busy(request) {
-  for (const status of ['in_progress', 'queued']) {
-    const data = await request('GET', 'actions/runs?status=' + status + '&per_page=100');
-    if (!data || !Array.isArray(data.workflow_runs) || !Number.isInteger(data.total_count) || data.total_count > data.workflow_runs.length || data.workflow_runs.some(run => typeof run?.path !== 'string')) throw new Error('Sender status unavailable');
-    if (data.workflow_runs.some(run => senderPath.test(run.path || ''))) return true;
+  for (const workflow of senderWorkflows) {
+    for (const status of ['in_progress', 'queued']) {
+      const data = await request('GET', 'actions/workflows/' + workflow + '/runs?status=' + status + '&per_page=1');
+      // One matching run proves the sender is busy, even when more pages exist.
+      // Missing or contradictory filtered results cannot prove it is idle.
+      if (!data || !Array.isArray(data.workflow_runs) || !Number.isInteger(data.total_count) || data.total_count < 0 ||
+          data.workflow_runs.length > 1 || data.total_count < data.workflow_runs.length ||
+          (data.total_count === 0) !== (data.workflow_runs.length === 0) ||
+          data.workflow_runs.some(run => typeof run?.path !== 'string' || run.path.split('@')[0] !== '.github/workflows/' + workflow || run.status !== status)) {
+        throw controlError('sender_status', 'validate', 'invalid_sender_response');
+      }
+      if (data.total_count > 0) return true;
+    }
   }
   return false;
 }
@@ -160,8 +202,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     else throw new Error('Unknown refill action');
   } catch (error) {
     output({run: false, reason: 'control_unavailable'});
-    const status = /^Control HTTP (\d{3})$/.exec(error.message || '')?.[1] || 'unknown';
-    console.log('Stock control unavailable (' + error.name + ', status=' + status + '); the next heartbeat will retry.');
+    console.log('Stock control unavailable ' + controlDiagnostic(error) + '; the next heartbeat will retry.');
     process.exitCode = 1;
   }
 }

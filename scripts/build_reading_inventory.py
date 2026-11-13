@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import hydra
@@ -11,6 +12,25 @@ from omegaconf import DictConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from zotero_arxiv_daily.curation import curate
+
+
+def read_sender_runs(repository, token, workflow, status):
+    url = f'https://api.github.com/repos/{repository}/actions/workflows/{workflow}/runs?status={status}&per_page=1'
+    for attempt in range(2):
+        try:
+            request = Request(url, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+                                            'User-Agent': 'eat-paper-inventory', 'X-GitHub-Api-Version': '2022-11-28'})
+            with urlopen(request, timeout=5) as response:
+                return json.load(response)
+        except (HTTPError, URLError, OSError) as error:
+            code = getattr(error, 'code', None)
+            transient = not isinstance(error, HTTPError) or code == 429 or (type(code) is int and code >= 500)
+            if transient and attempt == 0:
+                continue
+            status_code = code if type(code) is int else 'unknown'
+            reason = 'http_error' if isinstance(error, HTTPError) else 'network_or_timeout'
+            print(f'Stock sender-state check unavailable: endpoint=sender_status, stage=request, reason={reason}, status={status_code}', flush=True)
+            raise
 
 
 def sender_priority_check():
@@ -26,27 +46,27 @@ def sender_priority_check():
         token = os.environ.get('GITHUB_TOKEN', '')
         if not repository or not token:
             return True
-        for attempt in range(2):
-            try:
+        try:
+            for workflow in ('main.yml', 'supplement.yml', 'test.yml'):
                 for status in ('in_progress', 'queued'):
-                    url = f'https://api.github.com/repos/{repository}/actions/runs?status={status}&per_page=100'
-                    with urlopen(Request(url, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
-                                                      'User-Agent': 'eat-paper-inventory', 'X-GitHub-Api-Version': '2022-11-28'}), timeout=5) as response:
-                        data = json.load(response)
-                    runs = data['workflow_runs']
-                    if not isinstance(runs, list) or type(data.get('total_count')) is not int or data['total_count'] > len(runs) or any(not isinstance(run.get('path'), str) for run in runs):
-                        raise ValueError('Sender list incomplete')
-                    if any(run['path'].split('@')[0] in ('.github/workflows/main.yml', '.github/workflows/supplement.yml', '.github/workflows/test.yml') for run in runs):
+                    data = read_sender_runs(repository, token, workflow, status)
+                    runs = data.get('workflow_runs') if isinstance(data, dict) else None
+                    count = data.get('total_count') if isinstance(data, dict) else None
+                    if (not isinstance(runs, list) or type(count) is not int or count < 0 or len(runs) > 1 or
+                            count < len(runs) or (count == 0) != (len(runs) == 0) or
+                            any(not isinstance(run, dict) or not isinstance(run.get('path'), str) or
+                                run['path'].split('@')[0] != '.github/workflows/' + workflow or run.get('status') != status for run in runs)):
+                        print('Stock sender-state check unavailable: endpoint=sender_status, stage=validate, reason=invalid_sender_response, status=unknown', flush=True)
+                        return True
+                    if count > 0:
                         check.reason = 'sender_active'
                         return True
-                last_result[0] = False
-                check.reason = 'sender_idle'
-                break
-            except Exception as error:
-                if attempt:
-                    code = getattr(error, 'code', None)
-                    code = code if type(code) is int else 'unknown'
-                    print(f'Stock sender-state check unavailable: {type(error).__name__}, status={code}', flush=True)
+            last_result[0] = False
+            check.reason = 'sender_idle'
+        except (HTTPError, URLError, OSError):
+            pass  # The bounded read already recorded a safe diagnostic.
+        except Exception:
+            print('Stock sender-state check unavailable: endpoint=sender_status, stage=decode, reason=invalid_response, status=unknown', flush=True)
         return last_result[0]
     check.reason = 'sender_status_unavailable'
     return check
