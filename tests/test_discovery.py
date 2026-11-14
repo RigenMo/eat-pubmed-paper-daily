@@ -57,6 +57,51 @@ def test_public_retrieval_uses_four_bounded_channels(monkeypatch):
     assert all(timeout <= 8 for _, _, timeout in calls)
 
 
+def test_wider_recent_pool_reaches_older_candidates_without_widening_date_or_openalex_limits(monkeypatch):
+    import requests
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    calls = []
+    items = [{'source': 'MED', 'id': str(i + 1), 'title': f'Public study {i + 1}',
+              'abstractText': 'A public source abstract.', 'firstPublicationDate': '2026-10-20' if i >= 100 else '2026-11-01',
+              'electronicPublicationDate': '2026-10-20' if i >= 100 else '2026-11-01',
+              'journalInfo': {'journal': {'title': 'Example Journal'}}} for i in range(200)]
+    def get(url, params, timeout, **kwargs):
+        calls.append((url, params, timeout))
+        if 'openalex.org' in url:
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'results': []})
+        if 'europepmc' not in url:
+            raise requests.ConnectionError()
+        found = items if 'UK Biobank' in params['query'] else []
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'resultList': {'result': found}})
+    narrow, _ = discover(today=date(2026, 11, 11), per_channel=100, get=get)
+    wider, _ = discover(today=date(2026, 11, 11), per_channel=200, get=get)
+    assert len(narrow) == 100 and len(wider) == 200
+    assert any(p.publication_date == '2026-10-20' for p in wider)
+    assert all('FIRST_PDATE:[2026-08-13 TO 2026-11-11]' in p['query'] for u, p, _ in calls if 'europepmc' in u)
+    assert all(p['per-page'] <= 100 for u, p, _ in calls if 'openalex.org' in u)
+    assert all(timeout <= 8 for _, _, timeout in calls)
+
+
+def test_parallel_channels_share_ncbi_request_start_limit(monkeypatch):
+    import zotero_arxiv_daily.discovery as module
+    monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    now, started = [0.0], []
+    monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(module.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    def get(url, params, timeout, **kwargs):
+        if 'eutils.ncbi' in url:
+            started.append(now[0])
+            data = {'linksets': []} if 'elink' in url else {'esearchresult': {'idlist': [], 'count': '0'}}
+        elif 'openalex.org' in url:
+            data = {'results': []}
+        else:
+            data = {'resultList': {'result': []}}
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: data)
+    module.discover(today=date(2026, 11, 11), get=get)
+    assert len(started) == 4
+    assert all(b - a >= 0.349 for a, b in zip(sorted(started), sorted(started)[1:]))
+
+
 def test_channel_failure_does_not_stop_other_channels(monkeypatch):
     import requests
     monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
