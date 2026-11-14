@@ -1,0 +1,69 @@
+name: Transfer quality benchmark (no email)
+on:
+  push:
+    branches: [codex/transfer-quality-benchmark]
+    paths: [.github/workflows/transfer-quality-diagnostic.yml]
+permissions:
+  contents: read
+concurrency:
+  group: reading-inventory-producer
+  cancel-in-progress: false
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Evaluate fixed public transfer examples without stock or SMTP
+        env:
+          PYTHONPATH: src
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+        run: |
+          uv run python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from openai import OpenAI
+          from zotero_arxiv_daily.protocol import Paper
+          from zotero_arxiv_daily.curation import RUBRIC, validate_thought_card
+          from zotero_arxiv_daily.llm_client import FailoverClient
+          from zotero_arxiv_daily.retriever.public_index import _AbstractText
+          client = FailoverClient(OpenAI(api_key=os.environ['OPENAI_API_KEY'],
+              base_url='https://llm.goaichat.top/v1', max_retries=0), ['glm-5.3'],
+              total_timeout=180, model_timeout=180)
+          client.model_reasoning_efforts['glm-5.3'] = 'low'
+          for pmid in ('42985803', '31341078'):
+              row = {'pmid': pmid, 'benchmark_only': True, 'stock_counted': 0, 'scope': 'abstract'}
+              start = time.monotonic()
+              try:
+                  query = urlencode({'query': 'EXT_ID:' + pmid + ' AND SRC:MED', 'format': 'json', 'resultType': 'core'})
+                  with urlopen(Request('https://www.ebi.ac.uk/europepmc/webservices/rest/search?' + query,
+                                       headers={'User-Agent': 'eat-paper-transfer-benchmark'}), timeout=25) as response:
+                      record = json.load(response)['resultList']['result'][0]
+                  parser = _AbstractText()
+                  parser.feed(record.get('abstractText', ''))
+                  abstract = '\n\n'.join(' '.join(part.split()) for part in ''.join(parser.parts).splitlines() if part.strip())
+                  assert abstract
+                  response = client.chat.completions.create(model='glm-5.3', max_tokens=65536,
+                      timeout=180, response_format={'type': 'json_object'}, messages=[
+                          {'role': 'system', 'content': RUBRIC}, {'role': 'user', 'content': json.dumps([
+                              {'id': '0', 'title': record['title'], 'abstract': abstract}])}])
+                  item = Paper._parse_reader_response(response)['items'][0]
+                  row['gate_eligible'] = bool(validate_thought_card(item, abstract)
+                      and item['scientific_contribution'] == item['thought_inspiration'] == 'high')
+                  row['ratings'] = {key: item.get(key) if isinstance(item.get(key), str)
+                      and item[key] in ('high', 'medium', 'low', 'uncertain') else 'invalid'
+                      for key in ('scientific_contribution', 'thought_inspiration', 'resource_feasibility')}
+                  row['quote_matches'] = isinstance(item.get('key_quote'), str) and item['key_quote'] in abstract
+                  row['intuition'] = str(item.get('original_question', ''))[:160]
+                  row['deletion_gap'] = str(item.get('reframed_question', ''))[:180]
+                  row['transfer_proposal_inference'] = str(item.get('transfer_action', ''))[:600]
+                  row['testable_hypothesis'] = str(item.get('testable_question', ''))[:220]
+                  row['conditions'] = str(item.get('conditions', ''))[:240]
+              except Exception as error:
+                  row.update(error_type=type(error).__name__, http_status=getattr(error, 'status_code', None))
+              row['elapsed_seconds'] = round(time.monotonic() - start, 2)
+              print(json.dumps({'transfer_benchmark': row}, ensure_ascii=False), flush=True)
+          print(json.dumps({'private_library_accessed': False, 'mail_sent': False, 'stock_counted': 0}))
+          PY
