@@ -23,6 +23,7 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
   const verified = summary?.stock_count_verified === true && summary.sent_ledger_digest === ledgerDigest && Number.isInteger(summary.stock_after) && summary.stock_after >= 0 && summary.stock_after <= 30;
   const stock = verified ? summary.stock_after : (previous?.stock_after ?? null);
   const policy = typeof summary?.policy === 'string' ? summary.policy : previous?.policy;
+  const retryVersion = typeof summary?.retry_version === 'string' ? summary.retry_version : previous?.retry_version;
   const comparable = previous?.stock_verified === true && Number.isInteger(previous.stock_after) &&
     previous.ledger_digest === ledgerDigest && previous.policy === policy;
   const progress = verified && Number.isInteger(summary?.prepared) && summary.prepared > 0 &&
@@ -40,13 +41,13 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
     else if (!progress) minutes = 60;
   }
   const deferred = {};
-  const all = {...(previous?.policy === policy ? previous?.deferred : {}), ...summary?.deferred};
+  const all = {...(previous?.policy === policy && previous?.retry_version === retryVersion ? previous?.deferred : {}), ...summary?.deferred};
   for (const [key, stamp] of Object.entries(all).sort((a, b) => Date.parse(b[1]) - Date.parse(a[1])).slice(0, 1000)) {
     if (/^[a-f0-9]{64}$/.test(key) && Date.parse(stamp) > now) deferred[key] = stamp;
   }
   return {version: 1, stock_after: stock, stock_verified: verified, target: 20,
     completed_at: new Date(now).toISOString(), next_allowed_at: new Date(now + minutes * 60000).toISOString(),
-    no_progress: streak, status, ledger_digest: ledgerDigest, run_id: String(runId || ''), policy, deferred,
+    no_progress: streak, status, ledger_digest: ledgerDigest, run_id: String(runId || ''), policy, retry_version: retryVersion, deferred,
     continue_now: !full && ((verified && progress) || ledgerChanged) && minutes === 0};
 }
 
