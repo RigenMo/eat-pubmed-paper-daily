@@ -2,9 +2,11 @@
 from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, wait
 from html.parser import HTMLParser
+from threading import Lock
 import math
 import os
 import re
+import time
 import requests
 
 from .paper_identity import paper_keys
@@ -234,7 +236,7 @@ def _openalex_channel(channel, size, today, days, get, key):
 def discover(today=None, days=90, per_channel=30, get=requests.get):
     """Retrieve a bounded public candidate pool. Errors are reported per channel."""
     today = today or date.today()
-    if days < 1 or not 1 <= per_channel <= 100:
+    if days < 1 or not 1 <= per_channel <= 200:
         raise ValueError('invalid discovery bounds')
     base = f'SRC:MED AND FIRST_PDATE:[{(today - timedelta(days=days)).isoformat()} TO {today.isoformat()}]'
     queries = {
@@ -244,22 +246,39 @@ def discover(today=None, days=90, per_channel=30, get=requests.get):
         'counterevidence': '("negative results" OR "null findings" OR "failed replication" OR "effect reversal" OR "boundary conditions")',
     }
     key = os.environ.get('OPENALEX_API_KEY', '').strip()
+    ncbi_lock, next_ncbi = Lock(), [0.0]
+
+    def ncbi_get(url, **kwargs):
+        # Coordinate all four channels: NCBI permits at most 3 requests/second
+        # without a separate NCBI key. Keep network I/O outside the lock.
+        # https://www.ncbi.nlm.nih.gov/books/NBK25497/
+        with ncbi_lock:
+            delay = next_ncbi[0] - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            next_ncbi[0] = time.monotonic() + 0.35
+        return get(url, **kwargs)
 
     def run(channel):
         query = queries[channel]
         size = min(per_channel, 10) if channel == 'citations' else per_channel
         sources = [('Europe PMC', lambda: _europe_channel(channel, base + ' AND ' + query, size, today, days, get)),
-                   ('PubMed', lambda: _pubmed_channel(channel, query, size, today, days, get))]
+                   ('PubMed', lambda: _pubmed_channel(channel, query, size, today, days, ncbi_get))]
         if channel == 'cross_disciplinary' or (key and channel == 'citations'):
-            sources.append(('OpenAlex', lambda: _openalex_channel(channel, size, today, days, get, key)))
+            # OpenAlex supports at most 100 per page. PubMed/EPMC may use the
+            # wider bounded pool without relying on deprecated OpenAlex limits.
+            # https://help.openalex.org/api/paging/
+            sources.append(('OpenAlex', lambda: _openalex_channel(channel, min(size, 100), today, days, get, key)))
         papers, providers = [], []
         for provider, fetch in sources:
             try:
                 found, returned = fetch()
                 papers.extend(found)
                 providers.append({'provider': provider, 'status': 'success' if returned else 'true_empty', 'returned': returned, 'accepted': len(found), 'metadata_filtered': returned - len(found)})
-            except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError, IndexError):
-                providers.append({'provider': provider, 'status': 'unavailable', 'returned': None})
+            except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError, IndexError) as error:
+                code = getattr(getattr(error, 'response', None), 'status_code', None)
+                providers.append({'provider': provider, 'status': 'unavailable', 'returned': None,
+                                  'error_type': type(error).__name__, 'http_status': code if type(code) is int else None})
         if not key and channel == 'citations':
             providers.append({'provider': 'OpenAlex', 'status': 'key_required_for_extra_requests', 'returned': None})
         available = [p for p in providers if p['status'] in ('success', 'true_empty')]

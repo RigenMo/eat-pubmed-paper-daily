@@ -210,7 +210,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         stock_keys = set().union(*(paper_keys(p) for p in stock)) if stock else set()
         stage = 'discovery'
         priority()
-        candidates, audit = _bounded(lambda: discover(per_channel=100), deadline)
+        candidates, audit = _bounded(lambda: discover(per_channel=200), deadline)
         counts['discovered'] = len(candidates)
         counts['discovery'] = audit
         if not any(item.get('status') in ('ok', 'success', 'true_empty') for item in audit):
