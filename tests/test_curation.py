@@ -396,7 +396,8 @@ def test_count_only_accepts_twenty_independent_qualified_cards(tmp_path, monkeyp
     assert result['stock_count_verified'] is True and result['prepared'] == 0
 
 
-def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('matching_reader_contract', [True, False])
+def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_path, monkeypatch, matching_reader_contract):
     from zotero_arxiv_daily.card_store import policy_fingerprint
     from zotero_arxiv_daily.paper_identity import paper_keys
     monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
@@ -411,7 +412,7 @@ def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_p
                                filter_corpus=lambda items: items)
     monkeypatch.setattr(curation, 'Executor', lambda config: executor)
     first, second = paper(1), paper(2)
-    control.write_text(json.dumps({'policy': policy_fingerprint(config, corpus),
+    control.write_text(json.dumps({'policy': policy_fingerprint(config, corpus), 'retry_version': curation.READER_RETRY_VERSION if matching_reader_contract else 'old-reader',
         'deferred': {key: (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat() for key in paper_keys(first)}}))
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([first, second], [{'status': 'success'}]))
     observed = []
@@ -420,7 +421,7 @@ def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_p
         return []
     monkeypatch.setattr(curation, 'enrich_journal_metrics', metrics)
     curation.curate(config)
-    assert observed == [second.url]
+    assert observed == ([second.url] if matching_reader_contract else [first.url, second.url])
 
 
 @pytest.mark.parametrize('failure_stage', ['review', 'reader', 'save'])
@@ -467,7 +468,7 @@ def test_failed_identity_stays_deferred_through_round_and_max_backoff(tmp_path, 
     assert result['prepared'] == 0
     for key in paper_keys(paper(1)):
         assert datetime.fromisoformat(result['deferred'][key]) == clock[0] + timedelta(minutes=180)
-    control.write_text(json.dumps({'policy': result['policy'], 'deferred': result['deferred']}), encoding='utf-8')
+    control.write_text(json.dumps({'policy': result['policy'], 'retry_version': result['retry_version'], 'deferred': result['deferred']}), encoding='utf-8')
     # A whole 45-minute run followed by the largest 120-minute retry backoff.
     clock[0] += timedelta(minutes=166)
     before = (len(reviews), len(readers), len(saves))

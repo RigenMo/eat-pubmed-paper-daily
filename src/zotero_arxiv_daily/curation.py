@@ -16,7 +16,7 @@ from .discovery import discover, sample_candidates
 from .executor import Executor
 from .journal_metrics import enrich_journal_metrics
 from .paper_identity import filter_unseen, load_history, paper_keys
-from .protocol import Paper
+from .protocol import Paper, READER_RETRY_VERSION
 from .bibliographic_verification import verified_openalex, verify_openalex
 from .llm_client import BackgroundWorkPaused, FailoverClient
 
@@ -147,6 +147,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         raise ValueError('max_new must be between 1 and 12')
     deadline = min(deadline, time.monotonic() + 2700) if deadline is not None else time.monotonic() + 2700
     counts = {'status': 'ok', 'stock_before': 0, 'stock_after': 0, 'discovered': 0, 'approved': 0, 'prepared': 0, 'stock_target': 20, 'target_met': False, 'stock_count_verified': False, 'deferred': {}}
+    counts['retry_version'] = READER_RETRY_VERSION
     def priority():
         if should_yield is not None and should_yield():
             raise BackgroundWorkPaused('Sender has priority')
@@ -174,7 +175,7 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
         deferred = set()
         try:
             control = json.loads(Path(os.environ.get('INVENTORY_CONTROL_FILE', '.cache/inventory-replenishment.json')).read_text(encoding='utf-8'))
-            if control.get('policy') == counts['policy']:
+            if control.get('policy') == counts['policy'] and control.get('retry_version') == READER_RETRY_VERSION:
                 deferred = {key for key, stamp in control.get('deferred', {}).items()
                             if datetime.fromisoformat(stamp.replace('Z', '+00:00')) > datetime.now(timezone.utc)}
         except (OSError, ValueError, TypeError, KeyError):

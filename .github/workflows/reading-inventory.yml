@@ -10,6 +10,7 @@ on:
       - .github/workflows/reading-inventory.yml
       - scripts/build_reading_inventory.py
       - src/zotero_arxiv_daily/curation.py
+      - src/zotero_arxiv_daily/protocol.py
       - scripts/inventory_replenishment.mjs
   schedule:
     - cron: '7,27,47 * * * *' # Refill heartbeat; no model call when full/backing off.

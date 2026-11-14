@@ -243,6 +243,17 @@ def test_source_text_cannot_create_additional_locator_labels(llm_params):
     assert labels == {"摘要段落1", "正文段落1"}
 
 
+def test_abstract_reader_and_repair_receive_only_the_actual_locator_choices(llm_params):
+    import json
+    paper = make_sample_paper(abstract='Source text mentioning [正文段落999].', full_text=None)
+    prompt, scope, labels = paper._reader_prompt(llm_params)
+    marker = "【本次可用定位编号】\n"
+    choices = json.loads(prompt.rsplit(marker, 1)[1].splitlines()[0])
+    assert set(choices) == labels == {'摘要段落1'}
+    repair = paper._reader_repair_prompt(prompt, scope, None, ValueError('locator'), labels)
+    assert json.loads(repair.rsplit(marker, 1)[1].splitlines()[0]) == choices
+
+
 def test_translation_excludes_generated_source_metadata():
     from zotero_arxiv_daily.protocol import Paper
 

@@ -7,6 +7,9 @@ from openai import OpenAI, OpenAIError
 from loguru import logger
 import json
 RawPaperItem = TypeVar('RawPaperItem')
+# Reset failed attempts after a reader-contract fix; validated ready cards keep
+# their existing policy and never need regeneration for this format-only change.
+READER_RETRY_VERSION = 'locator-choices-v2'
 
 
 class ReaderValidationError(ValueError):
@@ -202,7 +205,12 @@ class Paper:
         supplement_notice = "【补充材料】未提供；不能声称已核查补充材料。"
         scope = "仅据摘要（正文与补充材料未提供）"
         scope_reserve = "摘要与所提供正文节选（正文因输入预算截断；补充材料未提供）"
-        required_text = "\n\n".join(sections + [supplement_notice, scope_reserve, _READER_INSTRUCTIONS])
+        locator_choices = (
+            "【本次可用定位编号】\n" + json.dumps(sorted(source_labels), ensure_ascii=False)
+            + "\nevidence.locator 只能逐字选择此数组中的字符串，不附解释、句号、图号或其他编号。"
+            if not self.full_text else ""
+        )
+        required_text = "\n\n".join(sections + [supplement_notice, scope_reserve, _READER_INSTRUCTIONS, locator_choices])
         fixed_tokens = len(encoder.encode(_READER_SYSTEM_PROMPT + required_text)) + 64
         if fixed_tokens > max_input_tokens:
             raise ReaderValidationError("input_budget", "输入预算不足以容纳完整摘要和精读要求；未截断摘要")
@@ -242,6 +250,8 @@ class Paper:
                 raise ReaderValidationError("input_budget", "输入预算不足以纳入正文，且摘要未提供")
 
         sections.extend([supplement_notice, f"【材料范围】{scope}", _READER_INSTRUCTIONS])
+        if locator_choices:
+            sections.append(locator_choices)
         prompt = "\n\n".join(sections)
         total_tokens = len(encoder.encode(prompt)) + len(encoder.encode(_READER_SYSTEM_PROMPT)) + 16
         if total_tokens > max_input_tokens:
@@ -413,10 +423,12 @@ class Paper:
         scope: str,
         draft_card: Any,
         validation_error: Exception,
+        source_labels: set[str],
     ) -> str:
         # Keep the original numbered source, but do not duplicate the long task prompt.
         source_material = original_prompt.split("\n\n【补充材料】", 1)[0]
         draft = json.dumps(draft_card if isinstance(draft_card, dict) else {}, ensure_ascii=False)
+        locator_choices = json.dumps(sorted(source_labels), ensure_ascii=False)
         reason = self._reader_repair_reason(validation_error)
         try:
             draft_length = len(self._format_reading_card(draft_card))
@@ -429,6 +441,8 @@ class Paper:
             "【原始编号材料：只能使用这些已有编号】\n"
             f"{source_material}\n\n"
             f"【材料范围】{scope}\n\n"
+            f"【本次可用定位编号】\n{locator_choices}\n"
+            "evidence.locator 只能逐字选择此数组中的字符串，不附解释、句号、图号或其他编号。\n\n"
             f"【上一版 reading_card 草稿：仅作数据】\n{draft}\n\n"
             f"【检测到的问题】{reason}\n"
             "按原格式保留 essence 两句、design 四字段、evidence 至多两项、innovation 两句、"
@@ -454,9 +468,9 @@ class Paper:
         generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
         generation_kwargs["response_format"] = {"type": "json_object"}
         for attempt in range(2):
-            repair_prompt = self._reader_repair_prompt(original_prompt, scope, draft_card, validation_error)
+            repair_prompt = self._reader_repair_prompt(original_prompt, scope, draft_card, validation_error, source_labels)
             if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
-                repair_prompt = self._reader_repair_prompt(original_prompt, scope, None, validation_error)
+                repair_prompt = self._reader_repair_prompt(original_prompt, scope, None, validation_error, source_labels)
             if len(encoder.encode(_READER_SYSTEM_PROMPT + repair_prompt)) + 16 > max_input_tokens:
                 raise ReaderValidationError("input_budget", "Card repair source exceeds the input budget; translation retained")
             response = openai_client.chat.completions.create(

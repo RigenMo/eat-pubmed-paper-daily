@@ -71,6 +71,21 @@ assert.equal(uncertain.continue_now,false); console.log('ok');
     assert 'ok' in node(program, tmp_path)
 
 
+def test_reader_contract_update_resets_failed_attempts_without_changing_valid_stock(tmp_path):
+    program = '''
+import assert from 'node:assert/strict';
+const {advance}=await import(process.env.MODULE); const now=Date.now();
+const oldKey='a'.repeat(64), newKey='b'.repeat(64), stamp=new Date(now+3600000).toISOString();
+const previous={stock_after:4,stock_verified:true,ledger_digest:'ledger',policy:'same',retry_version:'old',deferred:{[oldKey]:stamp}};
+const summary={stock_after:4,stock_count_verified:true,sent_ledger_digest:'ledger',policy:'same',retry_version:'new',prepared:0,status:'stock_partial',deferred:{[newKey]:stamp}};
+const state=advance(previous,summary,now,'ledger',1);
+assert.equal(state.stock_after,4); assert.equal(state.stock_verified,true);
+assert.equal(state.retry_version,'new'); assert.ok(!Object.hasOwn(state.deferred,oldKey));
+assert.ok(Object.hasOwn(state.deferred,newKey)); console.log('ok');
+'''
+    assert 'ok' in node(program, tmp_path)
+
+
 def test_completion_records_state_then_only_dispatches_inventory(tmp_path):
     program = '''
 import assert from 'node:assert/strict'; import fs from 'node:fs';
