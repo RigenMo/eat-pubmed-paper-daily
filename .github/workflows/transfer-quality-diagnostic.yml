@@ -78,3 +78,4 @@ jobs:
           assert all('error_type' not in row for row in results), 'Public benchmark incomplete'
           assert [row['gate_eligible'] for row in results] == [False, True], 'Transfer contrast failed'
           PY
+# Resume public contrast after the verified production reserve reached 20.
