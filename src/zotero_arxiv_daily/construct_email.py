@@ -584,7 +584,9 @@ def get_block_html(
         else '<span style="font-size:14px; color:#777777;">原文链接（未核实）</span>'
     )
 
-    structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope, thought_card, original_abstract)
+    transfer_card = (thought_card if isinstance(innovation_assessment, Mapping)
+                     and innovation_assessment.get("domain_relation") == "cross_domain" else None)
+    structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope, transfer_card, original_abstract)
     report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
     # Keep the metric badges visible even when values are absent; ``未提供``
     # makes missing metadata explicit without inferring a year or category.
