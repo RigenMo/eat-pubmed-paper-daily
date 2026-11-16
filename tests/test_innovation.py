@@ -63,3 +63,20 @@ def test_invalid_first_response_can_be_corrected():
     assess_innovation([paper], client, {})
     assert paper.innovation_assessment["type"] == "cognitive"
     assert len(client.calls) == 2
+
+
+def test_rejected_foreign_bridge_does_not_drop_other_valid_classifications():
+    from tests.test_curation import thought
+    from zotero_arxiv_daily.innovation import quality_ready
+    foreign = make_sample_paper(title='A foreign science study')
+    direct = make_sample_paper(title='A direct epidemiology study')
+    bridge = thought()
+    bridge['transfer_review']['verdict'] = 'uncertain'
+    rejected = dict(item(0, 'cognitive', foreign.title), domain_relation='cross_domain', thought_card=bridge)
+    accepted = item(1, 'capability', direct.title)
+    client = Client([[rejected, accepted]])
+    assess_innovation([foreign, direct], client, {})
+    assert len(client.calls) == 1
+    assert foreign.innovation_assessment['type'] == 'cognitive'
+    assert not quality_ready(foreign)
+    assert direct.innovation_assessment['type'] == 'capability' and quality_ready(direct)

@@ -141,7 +141,9 @@ def assess_innovation(papers: list[Paper], client, llm_params, batch_size: int =
                     if domain == 'cross_domain' and kind != 'uncertain':
                         from .curation import validate_thought_card
                         if not validate_thought_card(thought, batch[int(key)].abstract) or not valid_transfer(thought, batch[int(key)].abstract):
-                            raise ValueError('invalid transfer review')
+                            # A rejected bridge is a normal candidate-level result,
+                            # not a malformed batch. Keep other qualified papers.
+                            thought = None
                     validated[key] = (assessment, thought if domain == 'cross_domain' else None)
                 results = validated
                 break
