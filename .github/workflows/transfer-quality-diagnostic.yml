@@ -1,7 +1,7 @@
 name: Transfer quality benchmark (no email)
 on:
   push:
-    branches: [codex/classified-transfer-stock]
+    branches: [codex/classified-transfer-stock, codex/direct-scientific-stock]
     paths: [.github/workflows/transfer-quality-diagnostic.yml]
 permissions:
   contents: read

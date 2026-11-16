@@ -53,9 +53,23 @@ def requires_transfer(paper):
             or (isinstance(assessment, dict) and assessment.get('domain_relation') == 'cross_domain'))
 
 
+def valid_direct_scientific(card, abstract):
+    # Reuse the source-grounded question/design review without inventing a
+    # cross-domain analogy. New direct stock still requires both dimensions high.
+    from .curation import validate_thought_card
+    return (validate_thought_card(card, abstract)
+            and card['scientific_contribution'] == card['thought_inspiration'] == 'high')
+
+
 def quality_ready(paper):
-    return (valid_innovation(getattr(paper, 'innovation_assessment', None), paper.title, paper.abstract)
-            and (not requires_transfer(paper) or valid_transfer(getattr(paper, 'thought_card', None), paper.abstract)))
+    if not valid_innovation(getattr(paper, 'innovation_assessment', None), paper.title, paper.abstract):
+        return False
+    if requires_transfer(paper):
+        return valid_transfer(getattr(paper, 'thought_card', None), paper.abstract)
+    if getattr(paper, '_approval_basis', None) == 'direct_scientific':
+        return (paper.innovation_assessment['domain_relation'] == 'direct'
+                and valid_direct_scientific(paper.thought_card, paper.abstract))
+    return True
 
 
 _SYSTEM = """Classify each research paper using only its supplied title and abstract.
@@ -75,8 +89,10 @@ items array, one per id: {id, type, reason, evidence}. type is cognitive, capabi
 mixed or uncertain. reason is a short Chinese explanation (at most 180 characters).
 evidence is an exact 8–200 character quotation from that paper's title or abstract;
 for uncertain it may be an empty string.
-Also give domain_relation: direct (human health, epidemiology or bioinformatics) or
-cross_domain (other disciplines). Classify by the scientific question, not discovery channel.
+Also give domain_relation: direct (the primary question and evidence concern epidemiology,
+population health inference, or bioinformatics) or cross_domain (other disciplines).
+A health application alone does not make optics, materials, device engineering, basic ML
+theory or experimental mechanisms direct. Classify the primary question, not discovery channel.
 For cross_domain supply thought_card using the transfer-review instructions below.
 Do not invent a bridge when unsupported. Do not include extended reasoning."""
 

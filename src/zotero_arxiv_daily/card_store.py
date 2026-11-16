@@ -92,6 +92,9 @@ def save_ready(paper, config, corpus):
             from .curation import validate_thought_card
             if not validate_thought_card(paper.thought_card, paper.abstract):
                 return
+        elif basis == 'direct_scientific':
+            if not quality_ready(paper):
+                return
         elif basis != 'library':
             return
         fingerprint = policy_fingerprint(config, corpus)
@@ -110,8 +113,9 @@ def save_ready(paper, config, corpus):
             from .curation import THOUGHT_FIELDS
             data['thought_card'] = {key: paper.thought_card[key] for key in THOUGHT_FIELDS}
             review = data['thought_card']['transfer_review']
-            data['thought_card']['transfer_review'] = {key: review[key] for key in
+            data['thought_card']['transfer_review'] = ({key: review[key] for key in
                 ('version', 'target', 'verdict', 'mapping', 'changed_comparison', 'discriminating_evidence')}
+                if isinstance(review, dict) else None)
         else:
             data['thought_card'] = None
         directory = _directory()
@@ -163,6 +167,10 @@ def load_ready(config, corpus, include_pending=False):
                     from .curation import validate_thought_card
                     if not validate_thought_card(paper.thought_card, paper.abstract):
                         continue
+                elif paper._approval_basis == 'direct_scientific':
+                    from .innovation import quality_ready
+                    if not quality_ready(paper):
+                        continue
                 elif paper._approval_basis != 'library':
                     continue
                 from .innovation import quality_ready
@@ -191,17 +199,17 @@ def load_offline_ready(config):
                 payload = json.loads(path.read_text(encoding='utf-8'))
                 saved = datetime.fromisoformat(payload['saved_at'])
                 if (payload['schema_version'] != 1 or payload.get('configuration_policy') != fingerprint
-                        or payload.get('approval_basis') != 'cognitive_transfer'
+                        or payload.get('approval_basis') not in ('cognitive_transfer', 'direct_scientific')
                         or not timedelta(0) <= now - saved <= timedelta(hours=24)):
                     continue
                 values = payload['paper']
                 paper = Paper(**{field: values.get(field) for field in FIELDS})
                 paper._aliases = payload.get('identity_keys', [])
-                paper._approval_basis = 'cognitive_transfer'
+                paper._approval_basis = payload['approval_basis']
                 paper._cache_basis = 'approved_cognitive_stock_library_unavailable'
                 from .innovation import quality_ready
                 if (_valid(paper, today, config) and validate_thought_card(paper.thought_card, paper.abstract)
-                        and (not config.recommendations.get('innovation_enabled', False) or quality_ready(paper))):
+                        and (paper._approval_basis != 'direct_scientific' and not config.recommendations.get('innovation_enabled', False) or quality_ready(paper))):
                     result.append(paper)
             except (ValueError, TypeError, KeyError, OSError):
                 continue
