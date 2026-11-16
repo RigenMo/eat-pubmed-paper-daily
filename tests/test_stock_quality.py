@@ -54,8 +54,9 @@ def prepare_legacy(tmp_path, monkeypatch, basis="cognitive_transfer"):
     p.thought_card.pop('transfer_review')
     p.innovation_assessment = {'type': 'uncertain', 'reason': '旧版待判定'}
     # Recreate a structurally valid legacy file without rewriting private inputs.
-    from zotero_arxiv_daily.paper_identity import paper_keys
+    from zotero_arxiv_daily.paper_identity import paper_keys, record_sent
     from datetime import datetime, timezone
+    record_sent(tmp_path / "history.json", [], datetime.now(timezone.utc).date())
     values = {field: getattr(p, field, None) for field in FIELDS}
     config.recommendations.innovation_enabled = True
     payload = {'schema_version': 1, 'policy': policy_fingerprint(config, corpus),
