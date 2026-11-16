@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .protocol import Paper
+from .innovation import valid_transfer
 
 
 framework = """<!DOCTYPE html>
@@ -292,6 +293,8 @@ def _build_reading_report_html(
     abstract_zh: Any,
     reading_card: Any,
     material_scope: Any,
+    thought_card: Any = None,
+    original_abstract: Any = None,
 ) -> str:
     """Render the canonical report without falling back to container reprs."""
     if not isinstance(reading_card, Mapping) or not reading_card or not _text_value(abstract_zh).strip():
@@ -308,6 +311,10 @@ def _build_reading_report_html(
     design = reading_card.get("design")
     evidence = reading_card.get("evidence")
     innovation = _string_items(reading_card.get("innovation"))
+    transfer_html = ""
+    if valid_transfer(thought_card, original_abstract):
+        insight = thought_card["transfer_action"].removeprefix("【推断】").strip()
+        transfer_html = '<p style="margin:6px 0; line-height:1.6;"><strong>可迁移认知【推断】：</strong>' + escape(insight) + '</p>'
     criticism = _string_items(reading_card.get("criticism"))
     self_test = reading_card.get("self_test")
 
@@ -326,8 +333,8 @@ def _build_reading_report_html(
         _section_row("3．关键证据", _build_evidence_html(evidence)),
         _section_row(
             "4．创新",
-            "".join(_render_paragraphs(item) for item in innovation)
-            or _render_paragraphs("【未报告/材料未提供】"),
+            ("".join(_render_paragraphs(item) for item in innovation)
+             or _render_paragraphs("【未报告/材料未提供】")) + transfer_html,
         ),
         _section_row(
             "5．批判",
@@ -550,7 +557,7 @@ def get_block_html(
     innovation_assessment: Any = None,
     thought_card: Any = None,
 ):
-    """Build one card; legacy thought_card input is accepted but never displayed."""
+    """Build one card; display only the current reviewed transfer inside section four."""
     journal_text = _text_value(journal).strip()
     source_row = (
         '<tr><td style="padding:4px 16px 6px; color:#555; font-style:italic; font-size:12px;">'
@@ -577,7 +584,7 @@ def get_block_html(
         else '<span style="font-size:14px; color:#777777;">原文链接（未核实）</span>'
     )
 
-    structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope)
+    structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope, thought_card, original_abstract)
     report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
     # Keep the metric badges visible even when values are absent; ``未提供``
     # makes missing metadata explicit without inferring a year or category.
@@ -700,6 +707,7 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
                 recommendation_matches=getattr(paper, "recommendation_matches", None),
                 show_missing_date=True,
                 innovation_assessment=getattr(paper, "innovation_assessment", None),
+                thought_card=getattr(paper, "thought_card", None),
             )
         )
 

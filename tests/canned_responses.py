@@ -247,6 +247,12 @@ def make_stub_smtp(sent_emails: list):
 # ---------------------------------------------------------------------------
 
 
+def reviewed_innovation(paper):
+    return {'type': 'capability', 'reason': '摘要说明沿已知维度推进测量能力。',
+            'evidence': paper.abstract[:80], 'scope': 'abstract',
+            'version': 'classification-transfer-v1', 'domain_relation': 'direct'}
+
+
 def make_sample_paper(**overrides) -> Paper:
     defaults = dict(
         source="arxiv",
@@ -342,4 +348,3 @@ SAMPLE_PUBMED_MEDLINE_TEXT = (
     "JT  - The Lancet\n"
     "\n"
 )
-

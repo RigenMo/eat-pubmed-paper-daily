@@ -81,8 +81,17 @@ def finalize_restored_stock(summary_file, verification_file):
         verified = {}
     matches = all(isinstance(summary.get(key), str) and summary[key] == verified.get(key)
                   for key in ('policy', 'sent_ledger_digest'))
+    from zotero_arxiv_daily.innovation import QUALITY_CONTRACT
     count = verified.get('stock_after')
-    accepted = (matches and verified.get('stock_count_verified') is True
+    classes = verified.get('classification_counts', {})
+    classified = (isinstance(classes, dict) and set(classes) == {'cognitive', 'capability', 'mixed'}
+                  and all(type(value) is int and value >= 0 for value in classes.values())
+                  and sum(classes.values()) == count)
+    required, transferred = (verified.get(key) for key in ('transfer_required', 'transfer_verified'))
+    quality = (summary.get('quality_contract') == verified.get('quality_contract') == QUALITY_CONTRACT
+               and classified and type(required) is int and type(transferred) is int
+               and 0 <= required == transferred <= (count if type(count) is int else -1))
+    accepted = (matches and quality and verified.get('stock_count_verified') is True
                 and type(count) is int and 20 <= count <= 30 and verified.get('target_met') is True
                 and verified.get('status') == 'ok')
     summary['stock_count_verified'] = summary['target_met'] = summary['durable_stock_verified'] = accepted
@@ -90,6 +99,8 @@ def finalize_restored_stock(summary_file, verification_file):
         summary['stock_after'] = count
         summary['journal_distribution'] = verified.get('journal_distribution', {})
         summary['status'] = 'ok'
+        for key in ('quality_contract', 'classification_counts', 'transfer_required', 'transfer_verified'):
+            summary[key] = verified[key]
     else:
         summary['status'] = 'stock_unavailable'
         summary['failure_stage'] = 'cloud_restore_verification'

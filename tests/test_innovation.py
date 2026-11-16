@@ -20,7 +20,7 @@ class Client:
 
 
 def item(index, kind, evidence, reason="摘要支持该判断"):
-    return {"id": str(index), "type": kind, "reason": reason, "evidence": evidence}
+    return {"id": str(index), "type": kind, "reason": reason, "evidence": evidence, "domain_relation": "direct"}
 
 
 def test_distinct_types_and_uncertain_use_only_supplied_evidence():

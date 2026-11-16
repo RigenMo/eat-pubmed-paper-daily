@@ -22,6 +22,10 @@ class FakePaper:
     def __init__(self, identifier, journal):
         self.url = f'https://pubmed.ncbi.nlm.nih.gov/{identifier}/'
         self.journal = journal
+        self.title = f'Public human health paper {identifier}'
+        self.abstract = 'This public abstract describes a human health study.'
+        from tests.canned_responses import reviewed_innovation
+        self.innovation_assessment = reviewed_innovation(self)
         self.publication_date = '2026-11-01'
         self.journal_metrics = {'jif': 12}
         self.reading_card = None

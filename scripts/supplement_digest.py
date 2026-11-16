@@ -19,7 +19,7 @@ from zotero_arxiv_daily.card_store import load_ready, load_offline_ready, save_r
 from zotero_arxiv_daily.llm_client import FailoverClient
 from zotero_arxiv_daily.reranker import get_reranker_cls
 from zotero_arxiv_daily.construct_email import render_email
-from zotero_arxiv_daily.innovation import assess_innovation
+from zotero_arxiv_daily.innovation import assess_innovation, quality_ready
 from zotero_arxiv_daily.journal_metrics import enrich_journal_metrics
 from zotero_arxiv_daily.paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from zotero_arxiv_daily.reading_preferences import effective_focus_mode, focus_evidence, order_candidates
@@ -175,6 +175,8 @@ def supplement(config, progress=None):
                 cached = [p for p in cached if ' '.join((getattr(p, 'title', '') or '').casefold().split()) not in getattr(lightweight, 'zotero_read_titles', set())]
         except Exception:
             cached = filter_unseen(load_offline_ready(config), seen)
+    if settings.get('innovation_enabled', True):
+        cached = [paper for paper in cached if quality_ready(paper)]
     selected = []
     if cached:
         # Receipts retain journal but not topic; retrieve delivered metadata to
@@ -275,6 +277,8 @@ def supplement(config, progress=None):
                 eligible = order_candidates(eligible, mode)
             selected = []
             for paper in eligible:
+                if settings.get('innovation_enabled', True) and not quality_ready(paper):
+                    continue
                 if len(selected) >= 10 - len(delivered):
                     break
                 journal = ' '.join((paper.journal or '').casefold().split())

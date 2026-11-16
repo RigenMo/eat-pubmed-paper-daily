@@ -113,7 +113,9 @@ def test_full_local_count_is_provisional_and_verify_only_uses_separate_output(tm
     calls = []
     def curate(config, **kwargs):
         calls.append(kwargs)
-        return {'target_met': True, 'stock_count_verified': True, 'stock_after': 20, 'status': 'ok'}
+        return {'target_met': True, 'stock_count_verified': True, 'stock_after': 20, 'quality_contract': 'classification-transfer-v1',
+               'classification_counts': {'cognitive': 10, 'capability': 8, 'mixed': 2},
+               'transfer_required': 12, 'transfer_verified': 12, 'status': 'ok'}
     monkeypatch.setattr(module, 'curate', curate)
     module.main.__wrapped__({})
     output = tmp_path / ('outputs/restored.json' if verify_only else 'outputs/inventory-summary.json')
@@ -134,7 +136,9 @@ def test_full_local_count_is_provisional_and_verify_only_uses_separate_output(tm
     ({'status': 'paused_for_sender'}, False), ({'policy': None}, False)])
 def test_full_acceptance_requires_matching_independent_restore(tmp_path, change, accepted):
     summary_file, verification_file = tmp_path / 'summary.json', tmp_path / 'restored.json'
-    summary = {'policy': 'policy', 'sent_ledger_digest': 'ledger', 'stock_after': 20,
+    summary = {'policy': 'policy', 'sent_ledger_digest': 'ledger', 'stock_after': 20, 'quality_contract': 'classification-transfer-v1',
+               'classification_counts': {'cognitive': 10, 'capability': 8, 'mixed': 2},
+               'transfer_required': 12, 'transfer_verified': 12,
                'stock_count_verified': False, 'target_met': True, 'prepared': 8, 'status': 'ok'}
     restored = dict(summary, stock_count_verified=True, prepared=0)
     restored.update(change)
@@ -150,7 +154,9 @@ def test_full_acceptance_requires_matching_independent_restore(tmp_path, change,
 def test_missing_restore_proof_cannot_leave_full_summary(tmp_path):
     summary_file = tmp_path / 'summary.json'
     summary_file.write_text(json.dumps({'policy': 'policy', 'sent_ledger_digest': 'ledger',
-        'stock_after': 20, 'stock_count_verified': False, 'target_met': True}), encoding='utf-8')
+        'stock_after': 20, 'quality_contract': 'classification-transfer-v1',
+               'classification_counts': {'cognitive': 10, 'capability': 8, 'mixed': 2},
+               'transfer_required': 12, 'transfer_verified': 12, 'stock_count_verified': False, 'target_met': True}), encoding='utf-8')
     result = module.finalize_restored_stock(summary_file, tmp_path / 'missing.json')
     assert result['stock_count_verified'] is result['target_met'] is False
     assert result['status'] == 'stock_unavailable'
@@ -163,7 +169,9 @@ def test_finalize_cli_reports_failed_restore_after_rewriting_summary(tmp_path, m
     monkeypatch.setenv('INVENTORY_FINALIZE_VERIFICATION', 'true')
     output = tmp_path / 'outputs'
     output.mkdir()
-    summary = {'policy': 'policy', 'sent_ledger_digest': 'ledger', 'stock_after': 20,
+    summary = {'policy': 'policy', 'sent_ledger_digest': 'ledger', 'stock_after': 20, 'quality_contract': 'classification-transfer-v1',
+               'classification_counts': {'cognitive': 10, 'capability': 8, 'mixed': 2},
+               'transfer_required': 12, 'transfer_verified': 12,
                'stock_count_verified': False, 'target_met': True, 'status': 'ok'}
     (output / 'inventory-summary.json').write_text(json.dumps(summary), encoding='utf-8')
     if restored_exists:

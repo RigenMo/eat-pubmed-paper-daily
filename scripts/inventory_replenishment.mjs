@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 
+const qualityContract = 'classification-transfer-v1';
 const branch = 'codex/reading-card-checkpoints';
 const statePath = '.github/inventory-replenishment.json';
 const localState = '.cache/inventory-replenishment.json';
@@ -12,6 +13,7 @@ const senderWorkflows = ['main.yml', 'supplement.yml', 'test.yml'];
 export function decide(state, now, ledgerDigest, busy = false, enabled = true) {
   if (!enabled) return {run: false, reason: 'paused_by_user'};
   if (busy) return {run: false, reason: 'sender_has_priority'};
+  if (state?.quality_contract !== qualityContract) return {run: true, reason: 'quality_review_due'};
   if (state?.stock_verified === true && state.stock_after >= 20 && state.ledger_digest === ledgerDigest &&
       now >= Date.parse(state.completed_at) && now - Date.parse(state.completed_at) < 3 * 3600000) return {run: false, reason: 'full'};
   if (Date.parse(state?.next_allowed_at) > now) return {run: false, reason: 'backoff', next: state.next_allowed_at};
@@ -24,12 +26,13 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
   const stock = verified ? summary.stock_after : (previous?.stock_after ?? null);
   const policy = typeof summary?.policy === 'string' ? summary.policy : previous?.policy;
   const retryVersion = typeof summary?.retry_version === 'string' ? summary.retry_version : previous?.retry_version;
+  const quality = summary?.quality_contract || previous?.quality_contract;
   const comparable = previous?.stock_verified === true && Number.isInteger(previous.stock_after) &&
-    previous.ledger_digest === ledgerDigest && previous.policy === policy;
-  const progress = verified && Number.isInteger(summary?.prepared) && summary.prepared > 0 &&
+    previous.ledger_digest === ledgerDigest && previous.policy === policy && previous.quality_contract === quality;
+  const progress = verified && (Number.isInteger(summary?.prepared) && summary.prepared > 0 || Number.isInteger(summary?.quality_revalidated) && summary.quality_revalidated > 0) &&
     (!comparable || stock > previous.stock_after);
   const status = ledgerChanged ? 'sent_ledger_changed' : (summary?.status || 'interrupted');
-  const full = verified && stock >= 20;
+  const full = verified && stock >= 20 && quality === qualityContract;
   let streak = previous?.no_progress || 0;
   if (progress || full) streak = 0;
   else if (status !== 'paused_for_sender' && !ledgerChanged) streak = Math.min(12, streak + 1);
@@ -41,11 +44,11 @@ export function advance(previous, summary, now, ledgerDigest, runId) {
     else if (!progress) minutes = 60;
   }
   const deferred = {};
-  const all = {...(previous?.policy === policy && previous?.retry_version === retryVersion ? previous?.deferred : {}), ...summary?.deferred};
+  const all = {...(previous?.policy === policy && previous?.retry_version === retryVersion && previous?.quality_contract === quality ? previous?.deferred : {}), ...summary?.deferred};
   for (const [key, stamp] of Object.entries(all).sort((a, b) => Date.parse(b[1]) - Date.parse(a[1])).slice(0, 1000)) {
     if (/^[a-f0-9]{64}$/.test(key) && Date.parse(stamp) > now) deferred[key] = stamp;
   }
-  return {version: 1, stock_after: stock, stock_verified: verified, target: 20,
+  return {version: 1, quality_contract: quality, stock_after: stock, stock_verified: verified, target: 20,
     completed_at: new Date(now).toISOString(), next_allowed_at: new Date(now + minutes * 60000).toISOString(),
     no_progress: streak, status, ledger_digest: ledgerDigest, run_id: String(runId || ''), policy, retry_version: retryVersion, deferred,
     continue_now: !full && ((verified && progress) || ledgerChanged) && minutes === 0};

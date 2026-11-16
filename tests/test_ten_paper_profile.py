@@ -38,7 +38,7 @@ def prepare(config, monkeypatch, tmp_path, mode):
     monkeypatch.setattr("zotero_arxiv_daily.executor.verify_recommendations", verify)
     def assess(candidates, *args, **kwargs):
         for paper in candidates:
-            paper.innovation_assessment = {"type": "cognitive", "reason": "Reframes the problem", "evidence": "Research material", "scope": "abstract"}
+            paper.innovation_assessment = {"type": "cognitive", "reason": "Reframes the problem", "evidence": "Research material", "scope": "abstract", "version": "classification-transfer-v1", "domain_relation": "direct"}
         return candidates
     monkeypatch.setattr("zotero_arxiv_daily.executor.assess_innovation", assess)
     def reader(paper, *args):

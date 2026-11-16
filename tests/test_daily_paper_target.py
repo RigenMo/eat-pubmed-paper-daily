@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from tests.canned_responses import make_sample_paper
+from tests.canned_responses import make_sample_paper, reviewed_innovation
 from tests.test_executor import _delivery_executor
 from zotero_arxiv_daily.protocol import CorpusPaper
 
@@ -22,6 +22,11 @@ def prepare(config, monkeypatch, journals, failed=()):
     executor.filter_corpus = lambda corpus: corpus
     monkeypatch.setattr("zotero_arxiv_daily.executor.enrich_journal_metrics", lambda candidates, *args: candidates)
     monkeypatch.setattr("zotero_arxiv_daily.executor.verify_recommendations", lambda candidates, *args, **kwargs: candidates)
+
+    def classify(candidates, *args):
+        for paper in candidates:
+            paper.innovation_assessment = reviewed_innovation(paper)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.assess_innovation", classify)
 
     def reader(paper, *args):
         if paper.title not in failed:

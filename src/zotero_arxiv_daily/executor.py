@@ -20,7 +20,7 @@ from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .journal_metrics import enrich_journal_metrics
 from .recommendations import build_zotero_queries, verify_recommendations
-from .innovation import assess_innovation
+from .innovation import assess_innovation, quality_ready
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
 from .paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from .card_store import load_ready, load_offline_ready, save_ready
@@ -638,6 +638,8 @@ class Executor:
                     is_focus = bool(focus_evidence(p, focus_mode))
                     record = records[id(p)]
                     record["skip_reasons"] = []
+                    if verify_related and recommendation_config.get("innovation_enabled", True) and not quality_ready(p):
+                        record["skip_reasons"].append("classification_or_transfer_unverified")
                     if verify_related and journal_counts.get(journal, 0) >= per_journal:
                         record["skip_reasons"].append("journal_limit")
                     if is_focus and focus_count >= focus_limit:
