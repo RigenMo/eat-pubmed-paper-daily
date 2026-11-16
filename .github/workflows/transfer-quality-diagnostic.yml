@@ -31,9 +31,10 @@ jobs:
           from zotero_arxiv_daily.llm_client import FailoverClient
           from zotero_arxiv_daily.retriever.public_index import _AbstractText
           client = FailoverClient(OpenAI(api_key=os.environ['OPENAI_API_KEY'],
-              base_url='https://llm.goaichat.top/v1', max_retries=0), ['glm-5.3'],
-              total_timeout=180, model_timeout=180)
+              base_url='https://llm.goaichat.top/v1', max_retries=0), ['glm-5.3', 'kimi-k3', 'deepseek-v4.1-flash', 'qwen3.8-max'],
+              total_timeout=600, model_timeout=180)
           client.model_reasoning_efforts['glm-5.3'] = 'low'
+          client.deadline = time.monotonic() + 600
           results = []
           for pmid in ('42985803', '31341078'):
               row = {'pmid': pmid, 'benchmark_only': True, 'stock_counted': 0, 'scope': 'abstract'}
