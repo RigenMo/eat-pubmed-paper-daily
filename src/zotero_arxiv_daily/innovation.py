@@ -48,9 +48,9 @@ def valid_transfer(card, abstract):
 
 def requires_transfer(paper):
     assessment = getattr(paper, 'innovation_assessment', None) or {}
+    # Discovery channels describe where a paper was found, not its discipline.
     return (getattr(paper, '_approval_basis', None) == 'cognitive_transfer'
-            or (isinstance(assessment, dict) and assessment.get('domain_relation') == 'cross_domain')
-            or bool(set(getattr(paper, 'discovery_channels', None) or []) & {'cross_disciplinary', 'citations', 'counterevidence'}))
+            or (isinstance(assessment, dict) and assessment.get('domain_relation') == 'cross_domain'))
 
 
 def quality_ready(paper):

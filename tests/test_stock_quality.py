@@ -160,3 +160,13 @@ const flat=advance(current,summary,now+1000,'ledger',2);
 assert.equal(flat.continue_now,false); console.log('ok');
 '''
     assert 'ok' in node(program, tmp_path)
+
+
+def test_discovery_channel_does_not_define_whether_a_paper_is_cross_domain():
+    p = paper()
+    p.discovery_channels = ['citations', 'cross_disciplinary']
+    assert quality_ready(p)  # Direct public-health question, classified from content.
+    p.innovation_assessment['domain_relation'] = 'cross_domain'
+    assert not quality_ready(p)
+    p.thought_card = thought()
+    assert quality_ready(p)
