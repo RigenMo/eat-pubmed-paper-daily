@@ -488,3 +488,31 @@ def test_current_focus_is_not_presented_as_zotero():
     assert '与当前课题相关' in html
     assert '与 Zotero 的关系' not in html
     assert '隐藏原文' not in html
+
+
+def test_reviewed_transfer_is_compact_escaped_and_inside_original_innovation_section():
+    from tests.test_curation import paper, thought
+    p = paper()
+    p.thought_card = thought()
+    p.thought_card['transfer_action'] = '【推断】比较相同疾病计数下的转变顺序，需要可靠时间记录。<img src=x onerror=alert(1)>'
+    before = dict(p.reading_card)
+    html = render_email([p])
+    assert html.count('可迁移认知【推断】') == 1
+    assert html.index('4．创新') < html.index('可迁移认知【推断】') < html.index('5．批判')
+    assert '&lt;img src=x onerror=alert(1)&gt;' in html
+    assert '<img src=x onerror=alert(1)>' not in html
+    assert p.reading_card == before
+    for name in ('1．本质', '2．设计', '3．关键证据', '4．创新', '5．批判'):
+        assert html.count(name) == 1
+    for hidden in ('可迁移思想卡', '独立定性判断', '数据需求', '适用条件', '待查证据'):
+        assert hidden not in html
+
+
+def test_unverified_transfer_never_appears_as_a_valid_insight():
+    from tests.test_curation import paper, thought
+    p = paper()
+    p.thought_card = thought()
+    p.thought_card['transfer_review']['verdict'] = 'uncertain'
+    html = render_email([p])
+    assert '可迁移认知【推断】' not in html
+    assert p.thought_card['transfer_action'] not in html

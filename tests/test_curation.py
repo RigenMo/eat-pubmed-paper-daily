@@ -17,11 +17,15 @@ def prepared_history(tmp_path):
 
 
 def thought():
-    return {'scientific_contribution': 'high', 'thought_inspiration': 'medium', 'resource_feasibility': 'low',
+    return {'scientific_contribution': 'high', 'thought_inspiration': 'high', 'resource_feasibility': 'low',
             'original_question': '【摘要】作者研究疾病转变吗？', 'reframed_question': '【推断】群体状态是否改变？',
-            'key_quote': 'A useful literal quote', 'transfer_action': '【推断】将状态模型用于人群。',
+            'key_quote': 'A useful literal quote', 'transfer_action': '【推断】将单次疾病计数改为随访中的状态转变比较，前提是有可靠的时间记录。',
             'testable_question': '【假设】状态变化与结局有关。', 'data_requirements': '【待核验】需要随访数据。',
-            'conditions': '【待核验】需要可靠时间顺序。', 'missing_evidence': '【待核验】外部验证未提供。'}
+            'conditions': '【待核验】需要可靠时间顺序。', 'missing_evidence': '【待核验】外部验证未提供。',
+            'transfer_review': {'version': 'classification-transfer-v1', 'target': 'epidemiology',
+                'verdict': 'supported', 'mapping': '【推断】对应研究中的状态与人群随访中的疾病状态。',
+                'changed_comparison': '【推断】比较相同疾病计数下不同转变顺序的后续风险。',
+                'discriminating_evidence': '【推断】通过时间外验证区分状态路径与单次计数的解释。'}}
 
 
 def paper(number=1):
@@ -34,7 +38,10 @@ def paper(number=1):
                  url=f'https://pubmed.ncbi.nlm.nih.gov/{number}/', journal=f'Journal {number}', discovery_channels=['frontier'],
                  publication_date=datetime.now(timezone(timedelta(hours=8))).date().isoformat(),
                  journal_metrics={'jif': 12}, abstract_zh='中文摘要', reading_card=card,
-                 material_scope='仅据摘要（正文与补充材料未提供）', reader_status='success')
+                 material_scope='仅据摘要（正文与补充材料未提供）', reader_status='success',
+                 innovation_assessment={'type': 'cognitive', 'reason': '以状态转变重构原来的疾病计数问题。',
+                    'evidence': 'A useful literal quote', 'scope': 'abstract', 'domain_relation': 'direct',
+                    'version': 'classification-transfer-v1'})
 
 
 def test_thought_evidence_and_resource():
@@ -60,7 +67,7 @@ def test_nested_review_ratings_are_rejected_without_type_error(field, value):
 @pytest.mark.parametrize('response_kind', ['fenced', 'nested_rating', 'truncated', 'empty', 'non_object', 'invalid_items'])
 def test_reviewer_uses_strict_shared_parser_and_rejects_malformed_cards(response_kind):
     import time
-    item = dict(thought(), id='0', thought_inspiration='high')
+    item = dict(thought(), innovation_assessment=paper().innovation_assessment, id='0', thought_inspiration='high')
     content = json.dumps({'items': [item]})
     finish_reason = 'stop'
     if response_kind == 'fenced':
@@ -141,7 +148,7 @@ def test_inventory_failure_preserves_stock_and_rerun_skips_complete(tmp_path, mo
 @pytest.mark.parametrize('contribution,inspiration', [('high', 'high'), ('medium', 'high'), ('high', 'medium')])
 def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_match(contribution, inspiration):
     import time
-    item = dict(thought(), id='0', scientific_contribution=contribution, thought_inspiration=inspiration)
+    item = dict(thought(), innovation_assessment=paper().innovation_assessment, id='0', scientific_contribution=contribution, thought_inspiration=inspiration)
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     def create(**kwargs):
         assert 'unrelated Zotero paper' not in json.dumps(kwargs)
@@ -153,7 +160,7 @@ def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_ma
     if contribution == inspiration == 'high':
         assert result == [p]
         assert p._approval_basis == 'cognitive_transfer'
-        assert p.innovation_assessment['type'] == 'uncertain'
+        assert p.innovation_assessment['type'] == 'cognitive'
     else:
         assert result == []
         assert p.thought_card is None
@@ -162,7 +169,7 @@ def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_ma
 @pytest.mark.parametrize('remaining,expected_timeout', [(45, 45), (1000, 720)])
 def test_background_review_request_budget_stays_within_whole_deadline(monkeypatch, remaining, expected_timeout):
     monkeypatch.setattr(curation.time, 'monotonic', lambda: 100)
-    item = dict(thought(), id='0', thought_inspiration='high')
+    item = dict(thought(), innovation_assessment=paper().innovation_assessment, id='0', thought_inspiration='high')
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     observed = []
     def create(**kwargs):
@@ -412,7 +419,7 @@ def test_deferred_candidate_uses_other_papers_instead_of_repeating_failure(tmp_p
                                filter_corpus=lambda items: items)
     monkeypatch.setattr(curation, 'Executor', lambda config: executor)
     first, second = paper(1), paper(2)
-    control.write_text(json.dumps({'policy': policy_fingerprint(config, corpus), 'retry_version': curation.READER_RETRY_VERSION if matching_reader_contract else 'old-reader',
+    control.write_text(json.dumps({'policy': policy_fingerprint(config, corpus), 'quality_contract': curation.QUALITY_CONTRACT, 'retry_version': curation.READER_RETRY_VERSION if matching_reader_contract else 'old-reader',
         'deferred': {key: (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat() for key in paper_keys(first)}}))
     monkeypatch.setattr(curation, 'discover', lambda **kwargs: ([first, second], [{'status': 'success'}]))
     observed = []
@@ -468,7 +475,7 @@ def test_failed_identity_stays_deferred_through_round_and_max_backoff(tmp_path, 
     assert result['prepared'] == 0
     for key in paper_keys(paper(1)):
         assert datetime.fromisoformat(result['deferred'][key]) == clock[0] + timedelta(minutes=180)
-    control.write_text(json.dumps({'policy': result['policy'], 'retry_version': result['retry_version'], 'deferred': result['deferred']}), encoding='utf-8')
+    control.write_text(json.dumps({'policy': result['policy'], 'quality_contract': result['quality_contract'], 'retry_version': result['retry_version'], 'deferred': result['deferred']}), encoding='utf-8')
     # A whole 45-minute run followed by the largest 120-minute retry backoff.
     clock[0] += timedelta(minutes=166)
     before = (len(reviews), len(readers), len(saves))

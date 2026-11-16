@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 import pytest
 
 from zotero_arxiv_daily.card_store import load_ready, save_ready
+from tests.canned_responses import reviewed_innovation
 from zotero_arxiv_daily.protocol import Paper
 
 
@@ -58,7 +59,7 @@ def test_full_cached_main_skips_retrieval_and_llm(config, monkeypatch, tmp_path)
         paper.url = f'https://pubmed.ncbi.nlm.nih.gov/{i + 1}/'
         paper.reading_card = {'complete': True}
         paper.abstract_zh = '摘要'
-        paper.innovation_assessment = {}
+        paper.innovation_assessment = reviewed_innovation(paper)
     executor = _delivery_executor(config, [])
     executor._search_mode = 2
     executor.fetch_zotero_corpus = lambda: [object()]
@@ -87,7 +88,7 @@ def test_partial_cached_main_survives_new_candidate_failure(config, monkeypatch,
     config.journals.enabled = False
     cached = make_sample_paper(title='Cached')
     cached.url = 'https://pubmed.ncbi.nlm.nih.gov/1/'
-    cached.reading_card, cached.abstract_zh, cached.innovation_assessment = {'complete': True}, '摘要', {}
+    cached.reading_card, cached.abstract_zh, cached.innovation_assessment = {'complete': True}, '摘要', reviewed_innovation(cached)
     candidate = make_sample_paper(title='Fresh')
     executor = _delivery_executor(config, [candidate])
     executor._search_mode = 5 if failure == 'query' else 2

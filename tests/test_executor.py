@@ -586,6 +586,11 @@ def test_related_if_eligible_papers_prioritize_publication_date(config, monkeypa
 
     monkeypatch.setattr("zotero_arxiv_daily.executor.enrich_journal_metrics", lambda papers, *args: papers)
     monkeypatch.setattr("zotero_arxiv_daily.executor.verify_recommendations", verify)
+    from tests.canned_responses import reviewed_innovation
+    def classify(papers, *args):
+        for paper in papers:
+            paper.innovation_assessment = reviewed_innovation(paper)
+    monkeypatch.setattr("zotero_arxiv_daily.executor.assess_innovation", classify)
     monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_tldr", lambda *args: None)
     monkeypatch.setattr("zotero_arxiv_daily.protocol.Paper.generate_title_translation", lambda *args: None)
     monkeypatch.setattr("zotero_arxiv_daily.executor.render_email", lambda *args, **kwargs: "HTML")

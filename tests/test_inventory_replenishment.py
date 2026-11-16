@@ -28,17 +28,17 @@ def test_continuation_fullness_consumption_and_backoff(tmp_path):
 import assert from 'node:assert/strict';
 const {advance,decide}=await import(process.env.MODULE);
 const now=Date.parse('2026-11-11T10:00:00Z');
-let s=advance(null,{stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:7,prepared:5,status:'stock_partial'},now,'ledger-a',55);
+let s=advance(null,{quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:7,prepared:5,status:'stock_partial'},now,'ledger-a',55);
 assert.equal(s.continue_now,true);
 assert.equal(decide(s,now,'ledger-a').run,true);
-s=advance(s,{stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:20,prepared:12,status:'ok'},now,'ledger-a',56);
+s=advance(s,{quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:20,prepared:12,status:'ok'},now,'ledger-a',56);
 assert.equal(s.continue_now,false);
 assert.equal(s.no_progress,0);
 assert.equal(decide(s,now,'ledger-a').reason,'full');
 assert.equal(decide(s,now,'ledger-b').run,true);
 assert.equal(decide(s,now+4*3600000,'ledger-a').run,true);
 for(let i=0;i<8;i++) {
- s=advance(s,{stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:2,prepared:0,status:'stock_unavailable'},now,'ledger-a',60+i);
+ s=advance(s,{quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'ledger-a',stock_after:2,prepared:0,status:'stock_unavailable'},now,'ledger-a',60+i);
  assert.equal(s.continue_now,false);
  const wait=Date.parse(s.next_allowed_at)-now;
  assert.ok(wait>=20*60000 && wait<=120*60000);
@@ -56,7 +56,7 @@ def test_saved_net_growth_continues_after_one_failure_but_flat_counts_back_off(t
 import assert from 'node:assert/strict';
 const {advance}=await import(process.env.MODULE); const now=Date.now();
 const previous={stock_after:2,stock_verified:true,ledger_digest:'ledger',policy:'policy',no_progress:3};
-const summary={stock_after:3,stock_count_verified:true,sent_ledger_digest:'ledger',policy:'policy',prepared:1,status:'stock_unavailable'};
+const summary={stock_after:3,quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'ledger',policy:'policy',prepared:1,status:'stock_unavailable'};
 const growing=advance(previous,summary,now,'ledger',1);
 assert.equal(growing.continue_now,true); assert.equal(growing.no_progress,0);
 assert.equal(Date.parse(growing.next_allowed_at),now);
@@ -77,7 +77,7 @@ import assert from 'node:assert/strict';
 const {advance}=await import(process.env.MODULE); const now=Date.now();
 const oldKey='a'.repeat(64), newKey='b'.repeat(64), stamp=new Date(now+3600000).toISOString();
 const previous={stock_after:4,stock_verified:true,ledger_digest:'ledger',policy:'same',retry_version:'old',deferred:{[oldKey]:stamp}};
-const summary={stock_after:4,stock_count_verified:true,sent_ledger_digest:'ledger',policy:'same',retry_version:'new',prepared:0,status:'stock_partial',deferred:{[newKey]:stamp}};
+const summary={stock_after:4,quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'ledger',policy:'same',retry_version:'new',prepared:0,status:'stock_partial',deferred:{[newKey]:stamp}};
 const state=advance(previous,summary,now,'ledger',1);
 assert.equal(state.stock_after,4); assert.equal(state.stock_verified,true);
 assert.equal(state.retry_version,'new'); assert.ok(!Object.hasOwn(state.deferred,oldKey));
@@ -90,7 +90,7 @@ def test_completion_records_state_then_only_dispatches_inventory(tmp_path):
     program = '''
 import assert from 'node:assert/strict'; import fs from 'node:fs';
 const {complete}=await import(process.env.MODULE); const calls=[];
-fs.mkdirSync('outputs'); fs.writeFileSync('outputs/inventory-summary.json',JSON.stringify({stock_count_verified:true,sent_ledger_digest:process.env.EMPTY_LEDGER_DIGEST,stock_after:5,prepared:2,status:'stock_partial'}));
+fs.mkdirSync('outputs'); fs.writeFileSync('outputs/inventory-summary.json',JSON.stringify({quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:process.env.EMPTY_LEDGER_DIGEST,stock_after:5,prepared:2,status:'stock_partial'}));
 const request=async(method,path,body)=>{calls.push({method,path,body});
  if(path.includes('inventory-replenishment.json') && method==='GET') return null;
  if(path.includes('sent-paper-history.json')) return {sha:'blob',content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
@@ -115,7 +115,7 @@ def test_failed_state_write_cannot_create_an_untracked_loop(tmp_path):
     program = '''
 import assert from 'node:assert/strict'; import fs from 'node:fs';
 const {complete}=await import(process.env.MODULE); let dispatched=false;
-fs.mkdirSync('outputs'); fs.writeFileSync('outputs/inventory-summary.json',JSON.stringify({stock_count_verified:true,sent_ledger_digest:process.env.EMPTY_LEDGER_DIGEST,stock_after:4,prepared:1,status:'stock_partial'}));
+fs.mkdirSync('outputs'); fs.writeFileSync('outputs/inventory-summary.json',JSON.stringify({quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:process.env.EMPTY_LEDGER_DIGEST,stock_after:4,prepared:1,status:'stock_partial'}));
 const request=async(method,path)=>{
  if(path.includes('inventory-replenishment') && method==='GET') return null;
  if(path.includes('sent-paper-history')) return {sha:'blob',content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
@@ -155,7 +155,7 @@ def test_delivery_during_a_stock_run_forces_a_new_count(tmp_path):
 import assert from 'node:assert/strict';
 const {advance,decide}=await import(process.env.MODULE);
 const now=Date.parse('2026-11-11T10:00:00Z');
-const s=advance(null,{stock_count_verified:true,sent_ledger_digest:'before-send',stock_after:20,prepared:0,status:'ok'},now,'after-send',55);
+const s=advance(null,{quality_contract:'classification-transfer-v1',stock_count_verified:true,sent_ledger_digest:'before-send',stock_after:20,prepared:0,status:'ok'},now,'after-send',55);
 assert.equal(s.stock_verified,false); assert.equal(s.continue_now,true);
 assert.equal(decide(s,now,'after-send').run,true); console.log('ok');
 '''
@@ -168,7 +168,7 @@ import assert from 'node:assert/strict'; import fs from 'node:fs';
 const {gate}=await import(process.env.MODULE);
 process.env.GITHUB_EVENT_NAME='schedule'; process.env.EVENT_SCHEDULE='15 12 * * *';
 process.env.GITHUB_OUTPUT='out.txt';
-const state={version:1,stock_verified:true,stock_after:20,ledger_digest:process.env.EMPTY_LEDGER_DIGEST,completed_at:new Date().toISOString(),next_allowed_at:new Date().toISOString()};
+const state={version:1,quality_contract:'classification-transfer-v1',stock_verified:true,stock_after:20,ledger_digest:process.env.EMPTY_LEDGER_DIGEST,completed_at:new Date().toISOString(),next_allowed_at:new Date().toISOString()};
 const request=async(method,path)=>{
  if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};
  if(path.includes('sent-paper-history')) return {content:Buffer.from(JSON.stringify({version:1,entries:{}})).toString('base64')};
@@ -276,7 +276,7 @@ def test_deployed_fix_rechecks_once_without_disabling_scheduled_backoff(tmp_path
     program = '''
 import assert from 'node:assert/strict'; import fs from 'node:fs';
 const {gate}=await import(process.env.MODULE); process.env.GITHUB_OUTPUT='out.txt';
-const now=Date.now(); const state={version:1,stock_after:0,stock_verified:true,
+const now=Date.now(); const state={version:1,quality_contract:'classification-transfer-v1',stock_after:0,stock_verified:true,
  completed_at:new Date(now).toISOString(),next_allowed_at:new Date(now+3600000).toISOString()};
 const request=async(method,path)=>{
  if(path.includes('/runs?')) return {total_count:0,workflow_runs:[]};

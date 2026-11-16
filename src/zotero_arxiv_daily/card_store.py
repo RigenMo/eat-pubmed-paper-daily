@@ -84,6 +84,9 @@ def save_ready(paper, config, corpus):
         today = datetime.now(timezone(timedelta(hours=8))).date()
         if not _valid(paper, today, config):
             return
+        from .innovation import quality_ready
+        if config.recommendations.get('innovation_enabled', False) and not quality_ready(paper):
+            return
         basis = getattr(paper, '_approval_basis', 'library')
         if basis == 'cognitive_transfer':
             from .curation import validate_thought_card
@@ -100,12 +103,15 @@ def save_ready(paper, config, corpus):
         metrics = data.get('journal_metrics') or {}
         data['journal_metrics'] = {key: metrics[key] for key in ('jif', 'year', 'source', 'quartile', 'jif_year', 'jcr_quartile', 'jcr_category', 'jcr_year', 'jcr_source', 'cas_quartile', 'cas_category', 'cas_year', 'cas_version', 'cas_source', 'metrics_provider', 'queried_at', 'verified_date') if key in metrics}
         innovation = data.get('innovation_assessment') or {}
-        data['innovation_assessment'] = {key: innovation[key] for key in ('type', 'reason', 'evidence', 'scope') if key in innovation}
+        data['innovation_assessment'] = {key: innovation[key] for key in ('type', 'reason', 'evidence', 'scope', 'version', 'domain_relation') if key in innovation}
         data['discovery_channels'] = [v for v in (paper.discovery_channels or []) if v in ('frontier', 'cross_disciplinary', 'citations', 'counterevidence')]
         data['source_metadata'] = [{key: item[key] for key in ('provider', 'channel', 'pmid', 'url', 'doi', 'verification', 'journal', 'publication_date') if key in item and isinstance(item[key], str)} for item in (paper.source_metadata or []) if isinstance(item, dict)]
-        if basis == 'cognitive_transfer':
+        if paper.thought_card is not None:
             from .curation import THOUGHT_FIELDS
             data['thought_card'] = {key: paper.thought_card[key] for key in THOUGHT_FIELDS}
+            review = data['thought_card']['transfer_review']
+            data['thought_card']['transfer_review'] = {key: review[key] for key in
+                ('version', 'target', 'verdict', 'mapping', 'changed_comparison', 'discriminating_evidence')}
         else:
             data['thought_card'] = None
         directory = _directory()
@@ -134,7 +140,7 @@ def save_ready(paper, config, corpus):
         return
 
 
-def load_ready(config, corpus):
+def load_ready(config, corpus, include_pending=False):
     if not config.recommendations.get('card_cache_enabled', False):
         return []
     try:
@@ -159,7 +165,9 @@ def load_ready(config, corpus):
                         continue
                 elif paper._approval_basis != 'library':
                     continue
-                if _valid(paper, today, config):
+                from .innovation import quality_ready
+                qualified = quality_ready(paper)
+                if _valid(paper, today, config) and (include_pending or not config.recommendations.get('innovation_enabled', False) or qualified):
                     result.append(paper)
             except (ValueError, TypeError, KeyError, OSError):
                 continue
@@ -191,7 +199,9 @@ def load_offline_ready(config):
                 paper._aliases = payload.get('identity_keys', [])
                 paper._approval_basis = 'cognitive_transfer'
                 paper._cache_basis = 'approved_cognitive_stock_library_unavailable'
-                if _valid(paper, today, config) and validate_thought_card(paper.thought_card, paper.abstract):
+                from .innovation import quality_ready
+                if (_valid(paper, today, config) and validate_thought_card(paper.thought_card, paper.abstract)
+                        and (not config.recommendations.get('innovation_enabled', False) or quality_ready(paper))):
                     result.append(paper)
             except (ValueError, TypeError, KeyError, OSError):
                 continue
