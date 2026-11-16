@@ -494,6 +494,7 @@ def test_reviewed_transfer_is_compact_escaped_and_inside_original_innovation_sec
     from tests.test_curation import paper, thought
     p = paper()
     p.thought_card = thought()
+    p.innovation_assessment['domain_relation'] = 'cross_domain'
     p.thought_card['transfer_action'] = '【推断】比较相同疾病计数下的转变顺序，需要可靠时间记录。<img src=x onerror=alert(1)>'
     before = dict(p.reading_card)
     html = render_email([p])
@@ -512,7 +513,18 @@ def test_unverified_transfer_never_appears_as_a_valid_insight():
     from tests.test_curation import paper, thought
     p = paper()
     p.thought_card = thought()
+    p.innovation_assessment['domain_relation'] = 'cross_domain'
     p.thought_card['transfer_review']['verdict'] = 'uncertain'
     html = render_email([p])
     assert '可迁移认知【推断】' not in html
     assert p.thought_card['transfer_action'] not in html
+
+
+def test_direct_paper_keeps_original_five_sections_without_extra_transfer_paragraph():
+    from tests.test_curation import paper, thought
+    p = paper()
+    p.thought_card = thought()
+    assert p.innovation_assessment['domain_relation'] == 'direct'
+    html = render_email([p])
+    assert '可迁移认知【推断】' not in html
+    assert '4．创新' in html and '5．批判' in html
