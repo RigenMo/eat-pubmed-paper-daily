@@ -1,0 +1,63 @@
+name: Public stock reader check (no email)
+on:
+  push:
+    branches: [codex/stock-reader-priority]
+    paths: [.github/workflows/stock-reader-check.yml]
+permissions:
+  contents: read
+concurrency:
+  group: reading-inventory-producer
+  cancel-in-progress: false
+jobs:
+  reader:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Validate full public reader with production limits
+        env:
+          PYTHONPATH: src
+          OPENAI_API_KEY: ${{ secrets.GOAICHAT_API_KEY }}
+        run: |
+          uv run python - <<'PY'
+          import json, os, time
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from openai import OpenAI
+          from zotero_arxiv_daily.protocol import Paper
+          from zotero_arxiv_daily.retriever.public_index import _AbstractText
+          from zotero_arxiv_daily.llm_client import FailoverClient
+          start = time.monotonic()
+          query = urlencode({'query':'EXT_ID:43017801 AND SRC:MED','format':'json','resultType':'core'})
+          with urlopen(Request('https://www.ebi.ac.uk/europepmc/webservices/rest/search?'+query,
+                               headers={'User-Agent':'eat-paper-public-reader-check'}), timeout=30) as r:
+              record = json.load(r)['resultList']['result'][0]
+          parser = _AbstractText()
+          parser.feed(record.get('abstractText',''))
+          abstract = '\n\n'.join(' '.join(p.split()) for p in ''.join(parser.parts).splitlines() if p.strip())
+          assert abstract
+          paper = Paper(source='pubmed',title=record['title'],abstract=abstract,authors=[],
+                        url='https://pubmed.ncbi.nlm.nih.gov/43017801/')
+          print(json.dumps({'stage':'public_input_preparation_started','elapsed':round(time.monotonic()-start,2)}),flush=True)
+          _, scope, labels = paper._reader_prompt({'max_input_tokens':1000000})
+          print(json.dumps({'stage':'public_input_ready','elapsed':round(time.monotonic()-start,2),
+                            'abstract_characters':len(abstract)}),flush=True)
+          client = FailoverClient(OpenAI(api_key=os.environ['OPENAI_API_KEY'],
+              base_url='https://llm.goaichat.top/v1',max_retries=0),
+              ['kimi-k3','glm-5.3','deepseek-v4.1-flash','qwen3.8-max'],
+              total_timeout=720,model_timeout=180)
+          client.model_reasoning_efforts['glm-5.3']='low'
+          client.preferred='glm-5.3'
+          client.deadline=time.monotonic()+600
+          settings={'max_input_tokens':1000000,'generation_kwargs':{
+              'model':'glm-5.3','max_tokens':65536,'timeout':720}}
+          paper.generate_tldr(client,settings)
+          valid=paper.reader_status=='success' and paper.reading_card is not None
+          if valid:
+              paper._validate_reader_payload({'abstract_zh':paper.abstract_zh,'reading_card':paper.reading_card},scope,labels)
+          print(json.dumps({'public_reader':{'valid':valid,'reader_status':paper.reader_status,
+              'elapsed_seconds':round(time.monotonic()-start,2),'public_pmid':'43017801',
+              'private_library_accessed':False,'mail_sent':False,'stock_counted':0}}),flush=True)
+          assert valid, 'Public full reader incomplete'
+          PY
