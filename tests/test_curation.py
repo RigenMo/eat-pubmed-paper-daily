@@ -148,7 +148,8 @@ def test_inventory_failure_preserves_stock_and_rerun_skips_complete(tmp_path, mo
 @pytest.mark.parametrize('contribution,inspiration', [('high', 'high'), ('medium', 'high'), ('high', 'medium')])
 def test_model_batch_requires_strong_contribution_and_transfer_without_zotero_match(contribution, inspiration):
     import time
-    item = dict(thought(), innovation_assessment=paper().innovation_assessment, id='0', scientific_contribution=contribution, thought_inspiration=inspiration)
+    foreign = dict(paper().innovation_assessment, domain_relation='cross_domain')
+    item = dict(thought(), innovation_assessment=foreign, id='0', scientific_contribution=contribution, thought_inspiration=inspiration)
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'items': [item]})))])
     def create(**kwargs):
         assert 'unrelated Zotero paper' not in json.dumps(kwargs)

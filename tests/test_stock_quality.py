@@ -171,3 +171,78 @@ def test_discovery_channel_does_not_define_whether_a_paper_is_cross_domain():
     assert not quality_ready(p)
     p.thought_card = thought()
     assert quality_ready(p)
+
+
+@pytest.mark.parametrize('domain,high,accepted', [
+    ('direct', True, True), ('cross_domain', True, False), ('direct', False, False)])
+def test_new_direct_scientific_value_does_not_require_an_invented_cross_domain_bridge(domain, high, accepted):
+    import time
+    from types import SimpleNamespace
+    from zotero_arxiv_daily import curation
+    p = paper()
+    item = dict(thought(), id='0', transfer_review=None,
+                innovation_assessment=dict(p.innovation_assessment, domain_relation=domain))
+    if not high:
+        item['thought_inspiration'] = 'medium'
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=json.dumps({'items':[item]})))])
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_:response)))
+    approved = curation.evaluate_batch([p],client,'model',time.monotonic()+60)
+    assert bool(approved) is accepted
+    if accepted:
+        assert p._approval_basis == 'direct_scientific' and quality_ready(p)
+        assert p.thought_card['transfer_review'] is None
+
+
+def test_direct_scientific_stock_roundtrips_and_survives_library_outage_without_fake_transfer(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.card_store import save_ready, load_offline_ready
+    monkeypatch.setenv('CARD_STORE_DIR',str(tmp_path/'cards'))
+    config=OmegaConf.create({'recommendations':{'card_cache_enabled':True,'innovation_enabled':True},
+                            'zotero':{'user_id':'test-account'}})
+    p=paper()
+    p._approval_basis,p.thought_card='direct_scientific',thought()
+    p.thought_card['transfer_review']=None
+    corpus=[SimpleNamespace(title='library',abstract='material')]
+    assert save_ready(p,config,corpus)
+    loaded=load_ready(config,corpus)
+    offline=load_offline_ready(config)
+    assert len(loaded)==len(offline)==1 and quality_ready(loaded[0]) and quality_ready(offline[0])
+    assert loaded[0]._approval_basis=='direct_scientific'
+    assert loaded[0].thought_card['transfer_review'] is None
+    loaded[0].thought_card['thought_inspiration']='medium'
+    assert not save_ready(loaded[0],config,corpus)
+    loaded[0].thought_card['thought_inspiration']='high'
+    loaded[0].innovation_assessment['domain_relation']='cross_domain'
+    assert not quality_ready(loaded[0])
+
+
+def test_legacy_transfer_basis_still_requires_transfer_after_direct_domain_reclassification():
+    import time
+    from zotero_arxiv_daily import curation
+    p=paper()
+    p._approval_basis='cognitive_transfer'
+    item=dict(thought(),id='0',transfer_review=None,innovation_assessment=p.innovation_assessment)
+    calls=[]
+    def create(**kwargs):
+        calls.append(json.loads(kwargs['messages'][1]['content']))
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps({'items':[item]})))])
+    client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    assert curation.evaluate_batch([p],client,'model',time.monotonic()+60)==[]
+    assert calls[0][0]['require_transfer'] is True
+
+
+def test_direct_offline_contract_stays_high_high_when_classification_toggle_is_disabled(tmp_path, monkeypatch):
+    from zotero_arxiv_daily.card_store import save_ready,load_offline_ready
+    monkeypatch.setenv('CARD_STORE_DIR',str(tmp_path/'cards'))
+    config=OmegaConf.create({'recommendations':{'card_cache_enabled':True,'innovation_enabled':False},
+                            'zotero':{'user_id':'test-account'}})
+    p=paper()
+    p._approval_basis,p.thought_card='direct_scientific',thought()
+    p.thought_card['transfer_review']=None
+    assert save_ready(p,config,[])
+    file=next((tmp_path/'cards').glob('*.json'))
+    data=json.loads(file.read_text(encoding='utf-8'))
+    data['paper']['thought_card']['thought_inspiration']='medium'
+    file.write_text(json.dumps(data),encoding='utf-8')
+    assert load_offline_ready(config)==[]
