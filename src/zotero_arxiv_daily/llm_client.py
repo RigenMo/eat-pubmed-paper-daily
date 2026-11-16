@@ -90,6 +90,7 @@ class FailoverClient:
             attempt = dict(kwargs, model=model, timeout=min(self.model_timeout, remaining / count))
             if model in self.model_reasoning_efforts:
                 attempt.setdefault("reasoning_effort", self.model_reasoning_efforts[model])
+            logger.info("LLM attempt: model={}, timeout_seconds={:.1f}", model, attempt["timeout"])
             try:
                 if isinstance(self._client, openai.OpenAI):
                     result = asyncio.run(self._async_create(attempt))

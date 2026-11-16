@@ -519,3 +519,40 @@ def test_journal_reaching_cap_is_deferred_before_next_review_call(tmp_path, monk
     for key in paper_keys(candidates[1]):
         deferred_until = datetime.fromisoformat(result['deferred'][key])
         assert before + timedelta(minutes=120) <= deferred_until <= datetime.now(timezone.utc) + timedelta(minutes=120)
+
+
+@pytest.mark.parametrize('reader_cooling', [False, True])
+def test_background_reader_keeps_configured_model_and_full_budget(tmp_path, monkeypatch, reader_cooling):
+    from zotero_arxiv_daily.llm_client import FailoverClient
+    monkeypatch.setenv('CARD_STORE_DIR', str(tmp_path / 'cards'))
+    monkeypatch.setenv('SENT_PAPER_HISTORY_FILE', str(tmp_path / 'history.json'))
+    config = OmegaConf.create({'recommendations': {'card_cache_enabled': True, 'innovation_enabled': True},
+        'journals': {'enabled': True, 'mode': 'easyscholar', 'easyscholar': {'api_key': 'test'}},
+        'llm': {'generation_kwargs': {'model': 'glm-5.3', 'max_tokens': 65536}}})
+    corpus = [SimpleNamespace(title='unrelated', abstract='library')]
+    calls = []
+    base = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kwargs: calls.append(kwargs) or object())))
+    client = FailoverClient(base, ['kimi-k3', 'glm-5.3', 'deepseek-v4.1-flash', 'qwen3.8-max'],
+                            total_timeout=720, model_timeout=180, clock=lambda: 100)
+    executor = SimpleNamespace(openai_client=client, fetch_zotero_corpus=lambda: corpus,
+                               filter_corpus=lambda items: items)
+    monkeypatch.setattr(curation, 'Executor', lambda _: executor)
+    monkeypatch.setattr(curation, 'discover', lambda **_: ([paper()], [{'status': 'ok'}]))
+    monkeypatch.setattr(curation, 'enrich_journal_metrics', lambda items, *a, **k: items)
+    def review(items, *args):
+        client.preferred = 'kimi-k3'
+        if reader_cooling:
+            client.failed_until['glm-5.3'] = 1000
+        for p in items:
+            p.thought_card, p._approval_basis = thought(), 'cognitive_transfer'
+        return items
+    monkeypatch.setattr(curation, 'evaluate_batch', review)
+    def reader(p, current, params):
+        current.chat.completions.create(model=params.generation_kwargs.model, timeout=450)
+    monkeypatch.setattr(Paper, 'generate_tldr', reader)
+    result = curation.curate(config)
+    assert result['prepared'] == result['stock_after'] == 1
+    assert len(calls) == 1
+    assert calls[0]['model'] == ('kimi-k3' if reader_cooling else 'glm-5.3')
+    assert calls[0]['timeout'] == 180

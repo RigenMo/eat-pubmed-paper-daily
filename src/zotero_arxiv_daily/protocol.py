@@ -494,7 +494,9 @@ class Paper:
                 logger.warning("Reader length repair: {}", _reader_diagnostic(error))
 
     def _generate_tldr_with_llm(self, openai_client: OpenAI, llm_params: dict) -> dict[str, Any]:
+        logger.info("Reader input preparation started")
         prompt, scope, source_labels = self._reader_prompt(llm_params)
+        logger.info("Reader input preparation completed")
         generation_kwargs = dict(llm_params.get("generation_kwargs", {}))
         generation_kwargs["response_format"] = {"type": "json_object"}
         response = openai_client.chat.completions.create(

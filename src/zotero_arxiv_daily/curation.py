@@ -380,6 +380,12 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
                     continue
                 try:
                     stage = 'complete_reading_card'
+                    # Review success on another model must not override the
+                    # explicitly configured reader. Keep recent-failure cooldowns.
+                    if isinstance(client, FailoverClient):
+                        reader_model = llm.generation_kwargs.model
+                        if client.failed_until.get(reader_model, 0) <= client.clock():
+                            client.preferred = reader_model
                     _bounded(lambda: paper.generate_tldr(client, llm), deadline)
                     if save_ready(paper, config, corpus):
                         counts['prepared'] += 1
