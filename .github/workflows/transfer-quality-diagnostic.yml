@@ -34,6 +34,7 @@ jobs:
               base_url='https://llm.goaichat.top/v1', max_retries=0), ['glm-5.3', 'kimi-k3', 'deepseek-v4.1-flash', 'qwen3.8-max'],
               total_timeout=600, model_timeout=180)
           client.model_reasoning_efforts['glm-5.3'] = 'low'
+          client.preferred = 'glm-5.3'
           client.deadline = time.monotonic() + 600
           results = []
           for pmid in ('42985803', '31341078'):
@@ -49,7 +50,7 @@ jobs:
                   abstract = '\n\n'.join(' '.join(part.split()) for part in ''.join(parser.parts).splitlines() if part.strip())
                   assert abstract
                   response = client.chat.completions.create(model='glm-5.3', max_tokens=65536,
-                      timeout=180, response_format={'type': 'json_object'}, messages=[
+                      timeout=600, response_format={'type': 'json_object'}, messages=[
                           {'role': 'system', 'content': RUBRIC}, {'role': 'user', 'content': json.dumps([
                               {'id': '0', 'title': record['title'], 'abstract': abstract}])}])
                   item = Paper._parse_reader_response(response)['items'][0]
