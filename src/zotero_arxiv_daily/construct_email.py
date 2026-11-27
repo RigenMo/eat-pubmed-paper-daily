@@ -6,6 +6,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .protocol import Paper
+from .newsletter_card import clean_newsletter, valid_newsletter_abstract
+from .journal_metrics import verified_two_year_jif
 from .innovation import valid_transfer
 
 
@@ -208,6 +210,55 @@ def _build_journal_metrics_html(metrics: Any) -> str:
         + "".join(badges)
         + "</td></tr>"
     )
+
+
+def _versioned_badges(metrics: Any) -> str:
+    def dated(value, year):
+        y = _text_value(year).strip()
+        if y.isdigit() and len(y) == 4 and value:
+            return f"{value}（{escape(y)}）"
+        return "未核实"
+
+    jif = verified_two_year_jif(metrics)
+    jif_source = _safe_url(_metric_value(metrics, "source"))
+    jif_year = _metric_value(metrics, "jif_year") or _metric_value(metrics, "year")
+    jcr_category = _metric_text(_metric_value(metrics, "jcr_category"), "")
+    jcr_quartile = _metric_text(_metric_value(metrics, "jcr_quartile"), "")
+    jcr_source = _safe_url(_metric_value(metrics, "jcr_source"))
+    jcr = f"{jcr_category} / {jcr_quartile}" if jcr_category and jcr_quartile and jcr_source else ""
+    jif_badge = dated(f"{jif:g}" if jif is not None and jif_source else "", jif_year)
+    if jif_badge != "未核实":
+        jif_badge = f'<a href="{jif_source}" style="color:inherit;">{jif_badge}</a>'
+    fields = [
+        ("两年 JIF", jif_badge),
+        ("JCR 分区", dated(jcr, _metric_value(metrics, "jcr_year"))),
+    ]
+    cas_category = _metric_value(metrics, "cas_category")
+    cas_quartile = _metric_value(metrics, "cas_quartile")
+    cas_year = _metric_value(metrics, "cas_year")
+    cas_source = _safe_url(_metric_value(metrics, "cas_source"))
+    for level, label in (("big", "中科院大类分区"), ("small", "中科院小类分区")):
+        parts = [_metric_text(_level_value(m, level), "") for m in (cas_category, cas_quartile)]
+        value = " / ".join(part for part in parts if part) if parts[1] and cas_source else ""
+        fields.append((label, dated(value, cas_year)))
+    return '<tr><td style="padding:5px 16px 8px;">' + "".join(
+        _metric_badge(label, value) for label, value in fields
+    ) + '</td></tr>'
+
+
+def _newsletter_rows(abstract_zh, card):
+    labels = (
+        ("作者的核心直觉（WHAT + WHY）", "intuition"),
+        ("关键比较（HOW）", "comparison"),
+        ("少了这项研究，卡在哪里？", "without"),
+        ("有了这项研究，能走到哪一步？", "advance"),
+    )
+    rows = [_section_row("中文摘要", _render_paragraphs(abstract_zh)),
+            _section_row("读论文", "")]
+    rows.extend(_section_row(label, _render_paragraphs(card[key])) for label, key in labels)
+    if card.get("transfer"):
+        rows.append(_section_row("研究启发", _render_paragraphs(card["transfer"])))
+    return "".join(rows)
 
 
 def get_empty_html() -> str:
@@ -522,6 +573,8 @@ def _build_innovation_html(assessment: Any) -> str:
     labels = {
         "cognitive": [("认知差", "#6d28d9", "#ede9fe")],
         "capability": [("能力差", "#1d4ed8", "#dbeafe")],
+        "newsletter_mixed": [("兼有", "#5b21b6", "#ede9fe")],
+        "newsletter_unknown": [("线索不足", "#374151", "#f3f4f6")],
         "mixed": [("认知差", "#6d28d9", "#ede9fe"), ("能力差", "#1d4ed8", "#dbeafe")],
     }.get(kind, [("待判定", "#4b5563", "#f3f4f6")])
     badges = "".join(
@@ -530,7 +583,7 @@ def _build_innovation_html(assessment: Any) -> str:
         for label, color, background in labels
     )
     reason = _text_value(assessment.get("reason")).strip()
-    reason_html = f'<div style="margin-top:4px; color:#555555; font-size:13px;">【推断】摘要判读：{escape(reason)}</div>' if reason else ""
+    reason_html = f'<div style="margin-top:4px; color:#555555; font-size:13px;">{"" if assessment.get("newsletter") else "【推断】摘要判读："}{escape(reason)}</div>' if reason else ""
     return f'<tr><td style="padding:2px 16px 6px; line-height:1.5; overflow-wrap:anywhere; word-break:break-word;">{badges}{reason_html}</td></tr>'
 
 
@@ -588,15 +641,27 @@ def get_block_html(
                      and innovation_assessment.get("domain_relation") == "cross_domain" else None)
     structured_report = _build_reading_report_html(abstract_zh, reading_card, material_scope, transfer_card, original_abstract)
     report_rows = structured_report or _build_fallback_rows(tldr, original_abstract, abstract_zh, material_scope)
+    newsletter = clean_newsletter(reading_card.get("newsletter")) if isinstance(reading_card, Mapping) else None
+    if newsletter and not valid_newsletter_abstract(abstract_zh):
+        newsletter = None
+    if newsletter:
+        report_rows = _newsletter_rows(abstract_zh, newsletter)
+        if title_zh_text:
+            title, title_zh_row = title_zh_text, ""
+
     # Keep the metric badges visible even when values are absent; ``未提供``
     # makes missing metadata explicit without inferring a year or category.
-    metrics_row = _build_journal_metrics_html(journal_metrics)
+    metrics_row = _versioned_badges(journal_metrics) if newsletter else _build_journal_metrics_html(journal_metrics)
     publication_row = _build_publication_html(
         publication_date,
         publication_history,
         show_missing=show_missing_date,
     )
-    recommendation_row = _build_recommendation_html(recommendation_matches)
+    recommendation_row = "" if newsletter else _build_recommendation_html(recommendation_matches)
+    innovation_row = _build_innovation_html(innovation_assessment)
+    if newsletter:
+        kind = {"认知差": "cognitive", "能力差": "capability", "兼有": "newsletter_mixed", "线索不足": "newsletter_unknown"}[newsletter["angle"]]
+        innovation_row = _build_innovation_html({"type": kind, "reason": newsletter["basis"], "newsletter": True})
     block_template = """
     <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%"
       style="width:100%; max-width:900px; margin:0 auto; font-family:Arial, 'Microsoft YaHei', sans-serif; border:1px solid #dddddd; border-radius:8px; background-color:#f9f9f9;">
@@ -606,9 +671,9 @@ def get_block_html(
         </td>
       </tr>
       {title_zh_row}
+      {metrics_row}
       {innovation_row}
       {source_row}
-      {metrics_row}
       <tr>
         <td style="padding:4px 16px; font-size:14px; color:#666666; line-height:1.6;">
           {authors}
@@ -624,10 +689,12 @@ def get_block_html(
       {report_rows}
     </table>
     """
+    if newsletter:
+        block_template = block_template.replace("max-width:900px", "max-width:640px")
     return block_template.format(
         title=_render_rich_text(title),
         title_zh_row=title_zh_row,
-        innovation_row=_build_innovation_html(innovation_assessment),
+        innovation_row=innovation_row,
         source_row=source_row,
         metrics_row=metrics_row,
         authors=_render_rich_text(authors),
@@ -687,6 +754,13 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
         else:
             author_list = [paper.authors] if _text_value(paper.authors).strip() else []
         authors = author_list[0] if author_list else "作者未提供"
+        mobile = bool((getattr(paper, "reading_card", None) or {}).get("newsletter"))
+        if mobile and len(author_list) > 1:
+            authors += " 等"
+        article_url = _paper_article_url(paper)
+        doi_url = getattr(paper, "pdf_url", None)
+        if mobile and _safe_url(doi_url) and urlparse(doi_url).hostname == "doi.org":
+            article_url = doi_url
 
         parts.append(
             get_block_html(
@@ -694,7 +768,7 @@ def render_email(papers: list[Paper], summary: str | None = None) -> str:
                 authors,
                 "",
                 getattr(paper, "tldr", None),
-                _paper_article_url(paper),
+                article_url,
                 affiliations=None,
                 source=paper.source,
                 journal=paper.journal,

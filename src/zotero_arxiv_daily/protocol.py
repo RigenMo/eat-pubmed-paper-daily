@@ -6,10 +6,11 @@ import tiktoken
 from openai import OpenAI, OpenAIError
 from loguru import logger
 import json
+from .newsletter_card import NEWSLETTER_RULES, clean_newsletter
 RawPaperItem = TypeVar('RawPaperItem')
 # Reset failed attempts after a reader-contract fix; validated ready cards keep
 # their existing policy and never need regeneration for this format-only change.
-READER_RETRY_VERSION = 'locator-choices-v2'
+READER_RETRY_VERSION = 'newsletter-v1'
 
 
 class ReaderValidationError(ValueError):
@@ -56,8 +57,7 @@ _READER_GROUNDING_RULES = """
 """
 
 _READER_INSTRUCTIONS = """
-先完整、忠实地翻译摘要，再解构研究。摘要译文保留原有结构、数字、单位和限定语，
-不插入解释或评价，不把正文或常识补进摘要；摘要未提供时写【未报告/材料未提供】。
+先完整、忠实地翻译摘要，再解构研究。摘要译文保留数字、单位和限定语，不插入解释或评价；按后面的日报规则组织为五段。摘要未提供时写【未报告/材料未提供】。
 abstract_zh只放摘要原文的译文，不含段落编号、材料范围、补充材料说明或任何任务要求。
 精读卡约600字，最多800字（不含摘要译文），以摘要定位主张，用实际提供的正文核查。
 围绕核心问题组织，避免重复摘要和罗列全部分析；适用于人群、实验、组学、算法、
@@ -90,7 +90,7 @@ reading_card结构如下：
   计算预测、模拟、实验机制和人群效果不自动相互推出。
 - self_test：必须是字符串，最后只留一个针对本文关键设计或假设的自测问题，不附答案。
 不要另加总结、通用局限清单或阅读建议。
-""" + _READER_GROUNDING_RULES + _CARD_LENGTH_GUIDANCE
+""" + _READER_GROUNDING_RULES + _CARD_LENGTH_GUIDANCE + NEWSLETTER_RULES
 
 _STRUCTURED_ABSTRACT_HEADING_RE = re.compile(
     r"^\s*(?:BACKGROUND|OBJECTIVE|OBJECTIVES|PURPOSE|AIM|AIMS|METHODS?|"
@@ -339,6 +339,11 @@ class Paper:
             "criticism": criticism,
             "self_test": self_test.strip(),
         }
+        if "newsletter" in card:
+            display = clean_newsletter(card["newsletter"])
+            if display is None:
+                raise ReaderValidationError("card_schema", "reading_card.newsletter is invalid")
+            clean_card["newsletter"] = display
         card_text = cls._format_reading_card(clean_card)
         if len(card_text) > 800:
             raise ReaderValidationError("overlength", f"reading_card exceeds 800 characters ({len(card_text)})")
@@ -451,6 +456,7 @@ class Paper:
             "格式化阅读卡（含标签）目标不超过650字，硬上限800字。"
             + _READER_GROUNDING_RULES
             + _CARD_LENGTH_GUIDANCE
+            + NEWSLETTER_RULES
         )
 
     def _repair_reader_card(

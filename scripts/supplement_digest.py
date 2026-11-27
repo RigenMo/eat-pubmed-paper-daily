@@ -21,6 +21,7 @@ from zotero_arxiv_daily.reranker import get_reranker_cls
 from zotero_arxiv_daily.construct_email import render_email
 from zotero_arxiv_daily.innovation import assess_innovation, quality_ready
 from zotero_arxiv_daily.journal_metrics import enrich_journal_metrics
+from zotero_arxiv_daily.newsletter_card import complete_newsletter
 from zotero_arxiv_daily.paper_identity import filter_unseen, load_history, paper_keys, record_sent
 from zotero_arxiv_daily.reading_preferences import effective_focus_mode, focus_evidence, order_candidates
 from zotero_arxiv_daily.recommendations import verify_recommendations
@@ -125,6 +126,7 @@ def write_summary(sent, cumulative, attempts):
             stream.write(f"complete={str(summary['complete']).lower()}\ncumulative={cumulative}\nretry_safe=true\n")
 
 def supplement(config, progress=None):
+    rank_options = {"prefer_health": True} if getattr(config, "journals", {}).get("require_dated_jif", False) else {}
     if progress is None:
         progress = {}
     progress.update(retry_safe=False, cumulative=0, attempts=0)
@@ -195,10 +197,12 @@ def supplement(config, progress=None):
                     raise ValueError('Delivered topic metadata unavailable')
                 focus_count = sum(bool(focus_evidence(by_id[identifier], mode)) for identifier in delivered)
             journal_counts = Counter(' '.join((paper['journal'] or '').casefold().split()) for paper in delivered.values())
-            for paper in order_candidates(cached, mode):
+            for paper in order_candidates(cached, mode, **rank_options):
                 journal = ' '.join((paper.journal or '').casefold().split())
                 is_focus = bool(focus_evidence(paper, mode))
                 if journal_counts[journal] >= int(settings.get('max_per_journal', 3)) or (is_focus and focus_count >= 9):
+                    continue
+                if config.journals.get("require_dated_jif", False) and not complete_newsletter(paper):
                     continue
                 selected.append(paper)
                 journal_counts[journal] += 1
@@ -272,9 +276,9 @@ def supplement(config, progress=None):
                 assess_innovation(eligible, executor.openai_client, config.llm)
             if cached:
                 cached_keys = set().union(*(paper_keys(paper) for paper in cached))
-                eligible = cached + [paper for paper in order_candidates(eligible, mode) if not paper_keys(paper) & cached_keys]
+                eligible = cached + [paper for paper in order_candidates(eligible, mode, **rank_options) if not paper_keys(paper) & cached_keys]
             else:
-                eligible = order_candidates(eligible, mode)
+                eligible = order_candidates(eligible, mode, **rank_options)
             selected = []
             for paper in eligible:
                 if settings.get('innovation_enabled', True) and not quality_ready(paper):
@@ -289,11 +293,17 @@ def supplement(config, progress=None):
                     if time.monotonic() >= deadline:
                         continue
                     paper.generate_tldr(executor.openai_client, config.llm)
-                    save_ready(paper, config, corpus)
+                    if not config.journals.get("require_dated_jif", False):
+                        save_ready(paper, config, corpus)
                 if not paper.reading_card or not paper.abstract_zh or paper.reader_status != 'success':
                     continue
                 if paper not in cached and time.monotonic() < deadline:
                     paper.generate_title_translation(executor.openai_client, config.llm)
+                if config.journals.get("require_dated_jif", False):
+                    if not complete_newsletter(paper):
+                        continue
+                    if paper not in cached:
+                        save_ready(paper, config, corpus)
                 selected.append(paper)
                 journal_counts[journal] += 1
                 focus_count += int(is_focus)

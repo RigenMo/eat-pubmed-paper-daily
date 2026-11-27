@@ -18,7 +18,8 @@ from .protocol import CorpusPaper
 from datetime import datetime, timezone
 from .reranker import get_reranker_cls
 from .construct_email import render_email
-from .journal_metrics import enrich_journal_metrics
+from .journal_metrics import enrich_journal_metrics, verified_two_year_jif
+from .newsletter_card import clean_newsletter, complete_newsletter, valid_newsletter_abstract
 from .recommendations import build_zotero_queries, verify_recommendations
 from .innovation import assess_innovation, quality_ready
 from .reading_preferences import effective_focus_mode, focus_queries, focus_evidence, order_candidates
@@ -388,6 +389,7 @@ class Executor:
         history_path = Path(os.environ.get("SENT_PAPER_HISTORY_FILE", ".cache/sent-paper-history.json"))
         history = load_history(history_path, required=send_mail and os.environ.get("GITHUB_ACTIONS", "").lower() == "true") if exclude_sent else None
         verify_related = bool(recommendation_config.get("enabled", False)) and self._search_mode > 1
+        mobile_digest = bool(journals_config.get("require_dated_jif", False))
         focus_mode = effective_focus_mode(recommendation_config) if verify_related else "balanced"
         self.focus_mode = focus_mode
         self.focus_preference_relaxed = False
@@ -422,13 +424,19 @@ class Executor:
         if exclude_sent:
             cached = filter_unseen(cached, set(history["entries"]))
         cached = filter_unseen(cached, getattr(self, 'zotero_read_keys', set()))
+        if mobile_digest:
+            cached = [p for p in cached
+                      if complete_newsletter(p)
+                      and (not journals_config.get("enabled", False) or
+                           (verified_two_year_jif(p.journal_metrics) or -1) >= float(journals_config.get("min_jif", 0)))]
+
         cached = [p for p in cached if ' '.join((p.title or '').casefold().split()) not in getattr(self, 'zotero_read_titles', set())]
-        if live_metrics_missing and not cached:
+        if live_metrics_missing and not cached and not mobile_digest:
             raise ValueError("Set EASYSCHOLAR_API_KEY to apply the live IF filter across all journals.")
         # Run the same journal and focus limits before skipping retrieval.
         target = min(int(self.config.executor.max_paper_num), int(recommendation_config.get("max_papers", 10)))
         counts, usable, focus = {}, [], 0
-        for candidate in order_candidates(cached, focus_mode):
+        for candidate in order_candidates(cached, focus_mode, prefer_health=mobile_digest):
             journal = " ".join((candidate.journal or "").casefold().split())
             is_focus = bool(focus_evidence(candidate, focus_mode))
             if counts.get(journal, 0) >= int(recommendation_config.get("max_per_journal", 3)):
@@ -438,14 +446,20 @@ class Executor:
             usable.append(candidate)
             counts[journal] = counts.get(journal, 0) + 1
             focus += int(is_focus)
-        cache_fills_target = bool(offline_cached) or (live_metrics_missing and bool(cached)) or (target > 0 and len(usable) >= target)
+        cache_fills_target = bool(offline_cached) or (live_metrics_missing and bool(cached) and not mobile_digest) or (target > 0 and len(usable) >= target)
 
         try:
             if not cache_fills_target and self._search_mode == 5 and "pubmed" in self.retrievers:
                 queries = build_zotero_queries(
                     corpus, openai_client=self.openai_client, llm_params=self.config.llm
                 )
-                queries = list(dict.fromkeys(focus_queries(focus_mode) + queries))
+                themes = []
+                if mobile_digest:
+                    themes = [
+                        '("dietary intake"[tiab] OR nutrition[tiab] OR "meal timing"[tiab]) AND (metabolic[tiab] OR cardiovascular[tiab])',
+                        '("cardiometabolic"[tiab] OR "metabolic disease"[tiab]) AND (cohort[tiab] OR trial[tiab] OR longitudinal[tiab])',
+                    ]
+                queries = list(dict.fromkeys(focus_queries(focus_mode) + queries + themes))
                 self.retrievers["pubmed"].set_pubmed_queries(queries)
                 logger.info(f"Automatic retrieval: {len(corpus)} references, {len(queries)} Zotero/current-focus queries")
 
@@ -570,7 +584,7 @@ class Executor:
                         reranked_papers = focus_candidates + verified_library
                         if recommendation_config.get("innovation_enabled", True) and time.monotonic() < deadline:
                             assess_innovation(reranked_papers, self.openai_client, self.config.llm)
-                        reranked_papers = order_candidates(reranked_papers, focus_mode)
+                        reranked_papers = order_candidates(reranked_papers, focus_mode, prefer_health=mobile_digest)
 
             except Exception as error:
                 if not cached:
@@ -651,12 +665,24 @@ class Executor:
                     logger.info(f"Reading candidate {len(attempted)}; completed {len(selected)}/{max_paper_num}: {p.url}")
                     if p not in cached:
                         p.generate_tldr(self.openai_client, self.config.llm)
-                        save_ready(p, self.config, corpus)
+                        if not mobile_digest:
+                            save_ready(p, self.config, corpus)
+                    if mobile_digest and (
+                        not clean_newsletter((p.reading_card or {}).get("newsletter"))
+                        or not valid_newsletter_abstract(p.abstract_zh)
+                    ):
+                        record["skip_reasons"].append("reading_card_failed")
+                        continue
                     if p.reading_card is None and require_cards:
                         record["skip_reasons"].append("reading_card_failed")
                         continue
                     if p not in cached and time.monotonic() < deadline:
                         p.generate_title_translation(self.openai_client, self.config.llm)
+                    if mobile_digest and not str(p.title_zh or "").strip():
+                        record["skip_reasons"].append("title_translation_failed")
+                        continue
+                    if mobile_digest and p not in cached:
+                        save_ready(p, self.config, corpus)
                     selected.append(p)
                     record["selected"] = True
                     journal_counts[journal] = journal_counts.get(journal, 0) + 1

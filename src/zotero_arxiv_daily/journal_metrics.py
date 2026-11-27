@@ -7,9 +7,12 @@ import unicodedata
 from datetime import datetime, timezone
 from time import monotonic, sleep
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import requests
 from loguru import logger
+
+from .publisher_jif import journal_key, load_nature_metrics
 
 
 _ENDPOINT = "https://www.easyscholar.cc/open/getPublicationRank"
@@ -206,12 +209,36 @@ class EasyScholarClient:
         return metrics
 
 
-def enrich_journal_metrics(papers: list[Any], journal_config: Any, max_retained: int | None = None) -> list[Any]:
+def verified_two_year_jif(metrics: Mapping[str, Any] | None) -> float | None:
+    """Only accept a dated value supplied by a versioned reference."""
+    if not isinstance(metrics, Mapping):
+        return None
+    year = str(metrics.get("jif_year") or metrics.get("year") or "").strip()
+    if len(year) != 4 or not year.isascii() or not year.isdecimal():
+        return None
+    current_year = datetime.now(timezone.utc).year
+    if not 1975 <= int(year) <= current_year:
+        return None
+    try:
+        source = urlparse(str(metrics.get("source") or "").strip())
+    except ValueError:
+        return None
+    if source.scheme != "https" or not source.hostname:
+        return None
+    # The runtime endpoint omits the edition; a local lookup date is not it.
+    if source.hostname.casefold() in {"easyscholar.cc", "www.easyscholar.cc"}:
+        return None
+    return _finite_jif(metrics.get("jif"))
+
+
+def enrich_journal_metrics(papers: list[Any], journal_config: Any, max_retained: int | None = None, *, require_versioned: bool = False) -> list[Any]:
     """Enrich papers and, when enabled, apply the configured finite-JIF gate.
 
     ``papers`` deliberately stays duck-typed so this helper does not import the
     heavier paper protocol or any retrieval dependencies.
     """
+    if require_versioned or _config_value(journal_config, "require_dated_jif", False):
+        return _enrich_dated(papers, journal_config, max_retained)
     easyscholar = _config_value(journal_config, "easyscholar", {})
     dynamic = bool(_config_value(journal_config, "enabled", False)) and _config_value(journal_config, "mode") == "easyscholar"
     if not _config_value(easyscholar, "enabled", False):
@@ -270,4 +297,56 @@ def enrich_journal_metrics(papers: list[Any], journal_config: Any, max_retained:
     )
     if checked_count < len(papers):
         logger.info("Deferred journal checks for {} additional candidates", len(papers) - checked_count)
+    return retained
+
+
+def _enrich_dated(papers, config, max_retained):
+    """Use current EasyScholar data as a lead, never as edition evidence."""
+    if not papers:
+        return []
+    min_jif = _finite_jif(_config_value(config, "min_jif", 0))
+    if min_jif is None:
+        raise ValueError("journals.min_jif must be a finite non-negative number")
+    settings = _config_value(config, "easyscholar", {})
+    key = str(_config_value(settings, "api_key", "") or "").strip()
+    client = EasyScholarClient(key, timeout=float(_config_value(settings, "timeout", 10)),
+                               min_interval=float(_config_value(settings, "min_interval", 0.55))) if (
+        key and _config_value(settings, "enabled", False)) else None
+    # Map PubMed abbreviations to titles only via explicitly checked aliases.
+    registry = {}
+    for entry in _config_value(config, "whitelist", []) or []:
+        entry = dict(entry)
+        aliases = entry.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        for name in (entry.get("name"), *aliases):
+            if journal_key(name):
+                registry[journal_key(name)] = entry
+
+    nature = load_nature_metrics()
+    retained = []
+    for paper in papers:
+        if max_retained is not None and len(retained) >= max_retained:
+            break
+        name = getattr(paper, "journal", None)
+        canonical = registry.get(journal_key(name), {})
+        versioned = [q for q in (canonical, nature.get(journal_key(canonical.get("name") or name), {}))
+                     if verified_two_year_jif(q) is not None]
+        if not versioned and _config_value(config, "enabled", False):
+            continue
+        # Check the existing provider only for candidates with a source that
+        # can establish the edition; never burn quota on unconfirmable leads.
+        live = client.lookup(canonical.get("name") or name) if name and client and not client.unavailable else None
+        # Newest verified edition wins; a live publisher match wins tied years.
+        selected = max(enumerate(versioned), key=lambda p: (
+            int(p[1].get("jif_year") or p[1]["year"]), p[0]))[1] if versioned else {}
+        metrics = {k: v for k, v in (live or {}).items() if k not in ("jif", "source", "jif_year", "year")}
+        metrics.update(selected)
+        if selected:
+            metrics["jif_year"] = selected.get("jif_year") or selected["year"]
+        paper.journal_metrics = metrics
+        jif = verified_two_year_jif(metrics)
+        if not _config_value(config, "enabled", False) or (jif is not None and jif >= min_jif):
+            retained.append(paper)
+    logger.info("Dated publisher JIF: retained {}/{} candidates at the configured threshold", len(retained), len(papers))
     return retained

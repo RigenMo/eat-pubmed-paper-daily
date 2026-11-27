@@ -1,9 +1,10 @@
 journals:
-  # Live JIF filtering follows automatic Zotero retrieval across all journals.
-  # The audited list below supplies fallback metadata, not a search restriction.
+  # Retrieval is not restricted by an allowlist. The current dated publisher
+  # index and these independently checked records supply final JIF evidence.
   enabled: true
   mode: easyscholar
   min_jif: 10.0
+  require_dated_jif: true # Use the same threshold, but require a dated publisher or authorized record.
   verified_date: "2026-11-01"
   # Fill EASYSCHOLAR_API_KEY in GitHub Actions Secrets. No key is stored here.
   # The live mode requires a key and never falls back to the fixed journal list.
@@ -79,3 +80,38 @@ journals:
       jif: 43.5
       source: https://academic.oup.com/eurheartj/pages/about
       verified_date: "2026-11-01"
+
+    - name: The Lancet Diabetes & Endocrinology
+      aliases: [Lancet Diabetes Endocrinol]
+      year: 2025
+      jif: 36.3
+      source: https://info.thelancet.com/landia/request-access
+    - name: The New England Journal of Medicine
+      aliases: [N Engl J Med, New England Journal of Medicine]
+      year: 2025
+      jif: 84.5
+      source: https://www.nejm.org/about-nejm/about-nejm
+    - name: NEJM Evidence
+      year: 2025
+      jif: 11.6
+      source: https://www.nejm.org/media-center/fact-sheet
+    - name: Nature Communications
+      aliases: [Nat Commun]
+      year: 2025
+      jif: 18.1
+      source: https://www.nature.com/ncomms/
+    - name: European Journal of Heart Failure
+      aliases: [Eur J Heart Fail]
+      year: 2025
+      jif: 10.7
+      source: https://academic.oup.com/eurjhf/pages/About
+    - name: Cardiovascular Research
+      aliases: [Cardiovasc Res]
+      year: 2025
+      jif: 12.5
+      source: https://academic.oup.com/cardiovascres/pages/About
+    - name: Journal of the American College of Cardiology
+      aliases: [J Am Coll Cardiol, JACC]
+      year: 2025
+      jif: 22.3
+      source: https://www.jacc.org/journal/jacc/author-center/for-authors

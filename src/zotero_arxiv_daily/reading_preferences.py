@@ -7,6 +7,10 @@ _FOCUS = re.compile(
     r"\bUK\s+Biobank\b|\bUKB\b|\bmultimorbid\w*\b|"
     r"\bmultiple (?:chronic|long[- ]term) conditions\b", re.IGNORECASE
 )
+_DIGEST_THEMES = re.compile(
+    r"\b(?:diet\w*|nutrition\w*|food\b|meal\b|cardio\w*|heart\b|vascular\b|"
+    r"metabol\w*|diabet\w*|insulin\b|obes\w*|lipid\w*)", re.IGNORECASE
+)
 _INNOVATION_ORDER = {"cognitive": 0, "mixed": 1, "capability": 2, "uncertain": 3}
 
 
@@ -47,10 +51,11 @@ def focus_evidence(paper, mode):
     return None
 
 
-def order_candidates(papers, mode):
+def order_candidates(papers, mode, *, prefer_health=False):
     ordered = sorted(papers, key=lambda paper: paper.publication_date or "", reverse=True)
     ordered.sort(key=lambda paper: (
         _INNOVATION_ORDER.get((paper.innovation_assessment or {}).get("type"), 3),
+        0 if not prefer_health or _DIGEST_THEMES.search((paper.title or "") + " " + (paper.abstract or "")) else 1,
         0 if focus_evidence(paper, mode) else 1,
     ))
     return ordered

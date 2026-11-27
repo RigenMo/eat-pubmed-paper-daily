@@ -12,6 +12,8 @@ from omegaconf import OmegaConf
 
 from .paper_identity import filter_unseen, paper_keys
 from .protocol import Paper
+from .newsletter_card import complete_newsletter
+from .journal_metrics import verified_two_year_jif
 from .reading_preferences import effective_focus_mode
 from .bibliographic_verification import verified_openalex
 
@@ -29,8 +31,8 @@ def policy_fingerprint(config, corpus):
     references = sorted((str(p.title), str(p.abstract)) for p in corpus)
     # Only the digest is persisted; library contents never leave memory here.
     journals = config.get('journals', {})
-    journal_policy = {key: journals.get(key) for key in ('enabled', 'mode', 'min_jif')}
-    data = json.dumps({'version': 1, 'reader': 'abstract-reader-v1', 'effective_focus': effective_focus_mode(config.recommendations), 'recommendations': settings, 'journals': journal_policy, 'corpus': references}, ensure_ascii=False, sort_keys=True, default=str)
+    journal_policy = {key: journals.get(key) for key in ('enabled', 'mode', 'min_jif', 'require_dated_jif')}
+    data = json.dumps({'version': 1, 'reader': 'mobile-digest-v1' if journals.get('require_dated_jif') else 'abstract-reader-v1', 'effective_focus': effective_focus_mode(config.recommendations), 'recommendations': settings, 'journals': journal_policy, 'corpus': references}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
 
 
@@ -39,14 +41,14 @@ def configuration_fingerprint(config):
     for key in ('card_cache_enabled', 'generation_budget_seconds'):
         settings.pop(key, None)
     journals = config.get('journals', {})
-    journal_policy = {key: journals.get(key) for key in ('enabled', 'mode', 'min_jif')}
+    journal_policy = {key: journals.get(key) for key in ('enabled', 'mode', 'min_jif', 'require_dated_jif')}
     zotero = config.get('zotero', {})
     identity = {key: zotero.get(key) for key in ('user_id', 'include_path', 'ignore_path')}
     if OmegaConf.is_config(identity['include_path']):
         identity['include_path'] = OmegaConf.to_container(identity['include_path'], resolve=True)
     if OmegaConf.is_config(identity['ignore_path']):
         identity['ignore_path'] = OmegaConf.to_container(identity['ignore_path'], resolve=True)
-    data = json.dumps({'version': 1, 'reader': 'abstract-reader-v1',
+    data = json.dumps({'version': 1, 'reader': 'mobile-digest-v1' if journals.get('require_dated_jif') else 'abstract-reader-v1',
         'effective_focus': effective_focus_mode(config.recommendations), 'recommendations': settings,
         'journals': journal_policy, 'zotero_identity': identity}, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(data.encode('utf-8')).hexdigest()
@@ -65,7 +67,14 @@ def _valid(paper, today, config):
     days = min(90, int(config.recommendations.get("publication_days", 90)))
     if published.isoformat() != paper.publication_date or not today - timedelta(days=days) <= published <= today:
         return False
-    jif = float((paper.journal_metrics or {}).get('jif', 0))
+    if config.get("journals", {}).get("require_dated_jif", False):
+        if not complete_newsletter(paper):
+            return False
+        jif = verified_two_year_jif(paper.journal_metrics)
+        if jif is None:
+            return False
+    else:
+        jif = float((paper.journal_metrics or {}).get('jif', 0))
     minimum = max(10, float(config.get("journals", {}).get("min_jif", 10)))
     if not math.isfinite(jif) or not math.isfinite(minimum) or jif < minimum:
         return False

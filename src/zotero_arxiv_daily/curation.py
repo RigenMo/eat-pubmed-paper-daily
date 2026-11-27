@@ -407,6 +407,8 @@ def curate(config, deadline=None, max_new=12, should_yield=None, count_only=Fals
                         if client.failed_until.get(reader_model, 0) <= client.clock():
                             client.preferred = reader_model
                     _bounded(lambda: paper.generate_tldr(client, llm), deadline)
+                    if config.journals.get("require_dated_jif", False):
+                        _bounded(lambda: paper.generate_title_translation(client, llm), deadline)
                     if save_ready(paper, config, corpus):
                         counts['prepared'] += 1
                         counts['stock_after'] += 1
