@@ -4,6 +4,57 @@ from pathlib import Path
 import json
 import os
 
+
+if __name__ == "__main__" and os.environ.get("GITHUB_EVENT_NAME") == "push":
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    if "[easyscholar-fields-only]" in (event.get("head_commit") or {}).get("message", ""):
+        import re
+        import requests
+        from urllib.parse import urlsplit
+        key = os.environ.get("EASYSCHOLAR_API_KEY")
+        if not key:
+            print("JOURNAL_FIELDS_RESULT missing_existing_secret")
+            raise SystemExit(1)
+        endpoint = "https://www.easyscholar.cc/open/getPublicationRank"
+        def structure(value, depth=0):
+            if depth >= 4:
+                return type(value).__name__
+            if isinstance(value, list):
+                return [structure(value[0], depth + 1)] if value else []
+            if isinstance(value, dict):
+                return {k: structure(v, depth + 1) for k, v in value.items()
+                        if isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9_]{1,70}", k)
+                        and key not in k}
+            return type(value).__name__
+        done = False
+        for journal in ("Nature Metabolism", "Cell Metabolism"):
+            try:
+                resp = requests.get(endpoint, params={"secretKey": key, "publicationName": journal},
+                                    allow_redirects=False, timeout=20)
+                if resp.status_code != 200:
+                    print("JOURNAL_FIELDS_RESULT", journal, "http_status", resp.status_code)
+                    continue
+                body = resp.json()
+                if not isinstance(body, dict):
+                    print("JOURNAL_FIELDS_RESULT", journal, "unexpected_json_type")
+                    continue
+                code = body.get("code")
+                data = body.get("data")
+                official = data.get("officialRank") if isinstance(data, dict) else None
+                ranks = official.get("all") if isinstance(official, dict) else None
+                payload = {"status": code if type(code) is int else None,
+                           "root_structure": structure(body),
+                           "rank_structure": structure(ranks),
+                           "jif_type": type(ranks.get("sciif")).__name__ if isinstance(ranks, dict) else None,
+                           "jif_is_number_only": (
+                               bool(re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", str(ranks.get("sciif")).strip()))
+                               if isinstance(ranks, dict) else False)}
+                print("JOURNAL_FIELDS_RESULT", journal, json.dumps(payload), flush=True)
+                done = done or (code == 200 and isinstance(ranks, dict) and bool(ranks))
+            except (ValueError, requests.RequestException):
+                print("JOURNAL_FIELDS_RESULT", journal, "response_unavailable", flush=True)
+        raise SystemExit(0 if done else 1)
+
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
