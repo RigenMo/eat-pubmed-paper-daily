@@ -12,10 +12,8 @@ on:
         type: string
         default: ''
   schedule:
-    - cron: '10 17-23 * * *' # 01:10-07:10 Asia/Shanghai.
-    - cron: '10 0-1 * * *' # 08:10-09:10 Asia/Shanghai.
-    - cron: '10 2 * * *' # 10:10 Asia/Shanghai deadline check.
-    - cron: '37 0-15 * * *' # Hourly, 08:37-23:37 Asia/Shanghai.
+    - cron: '0 23 * * *' # 07:00 Asia/Taipei: check the confirmed daily delivery.
+    - cron: '10 0 1,15 * *' # Repository maintenance only; no delivery recovery.
   workflow_run:
     workflows: ['Send emails daily']
     types: [completed]
@@ -54,6 +52,7 @@ jobs:
           PAPER_COUNT: ${{ steps.guard.outputs.paper_count }}
           DELIVERY_UNKNOWN: ${{ steps.guard.outputs.delivery_unknown }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
           RECOVER: ${{ inputs.recover }}
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           SOURCE_RUN_ID: ${{ inputs.sender_run_id }}
@@ -64,10 +63,10 @@ jobs:
             const workflow_id = 'main.yml';
             const localTime = new Date(Date.now() + 8 * 3600000);
             const hour = localTime.getUTCHours();
-            const earlyCheckDue = (hour > 1 || (hour === 1 && localTime.getUTCMinutes() >= 10)) && hour < 10;
+            const earlyCheckDue = process.env.EVENT_SCHEDULE === '0 23 * * *' && hour >= 7 && hour < 10;
             const allowed = (process.env.EVENT_NAME === 'schedule' && earlyCheckDue) ||
               (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.RECOVER === 'true') ||
-              (process.env.EVENT_NAME === 'workflow_run' && ['failure', 'cancelled'].includes(process.env.RUN_CONCLUSION));
+              (process.env.EVENT_NAME === 'workflow_run' && hour >= 7 && ['failure', 'cancelled'].includes(process.env.RUN_CONCLUSION));
             const workflow = await github.rest.actions.getWorkflow({ owner, repo, workflow_id });
             if (workflow.data.state !== 'active' && !allowed) {
               core.info(`Main workflow is disabled: ${workflow.data.state}; manual check only.`);
@@ -198,7 +197,7 @@ jobs:
           '
 
   morning-deadline:
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event_name == 'schedule' && github.event.schedule == '0 23 * * *' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -214,7 +213,7 @@ jobs:
           ref: main
       - name: Check deadline
         id: time
-        run: echo "due=$(TZ=Asia/Shanghai date +%H | awk '{if ($1 >= 10) print "true"; else print "false"}')" >> "$GITHUB_OUTPUT"
+        run: echo "due=$(TZ=Asia/Taipei date +%H | awk '{if ($1 >= 7) print "true"; else print "false"}')" >> "$GITHUB_OUTPUT"
       - name: Check delivery and morning notices
         if: steps.time.outputs.due == 'true'
         id: guard
@@ -224,10 +223,10 @@ jobs:
           NOTICE_KIND: morning
         run: python3 scripts/daily_delivery_guard.py
       - name: Setup uv
-        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '0 23 * * *'))
         uses: astral-sh/setup-uv@v7
       - name: Send morning deadline notice
-        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '10 2 * * *'))
+        if: steps.time.outputs.due == 'true' && ((steps.guard.outcome == 'success' && (steps.guard.outputs.day_complete == 'false' || steps.guard.outputs.delivery_unknown == 'true') && steps.guard.outputs.notified == 'false') || (steps.guard.outcome == 'failure' && github.event_name == 'schedule' && github.event.schedule == '0 23 * * *'))
         env:
           PYTHONPATH: src
           GUARD_OUTCOME: ${{ steps.guard.outcome }}
@@ -253,11 +252,11 @@ jobs:
           else:
               count = int(os.environ["PAPER_COUNT"])
               detail = f"已确认 {count}/10 篇完整精读，尚缺 {max(0, 10-count)} 篇"
-          send_email(config, f"<p>截至 {now}（北京时间），{detail}。当前可能正在生成或失败待恢复，请查看 Actions。</p><p><a href=\"{url}\">查看 Actions</a></p>", subject=f"Eat Paper Daily {now}（日报截止状态）")
+          send_email(config, f"<p>截至 {now}（台湾时间），{detail}。当前可能正在生成或失败待恢复，请查看 Actions。</p><p><a href=\"{url}\">查看 Actions</a></p>", subject=f"Eat Paper Daily {now}（日报截止状态）")
           '
 
   keep-alive:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' && github.event.schedule == '10 0 1,15 * *'
     runs-on: ubuntu-latest
     permissions:
       contents: write
